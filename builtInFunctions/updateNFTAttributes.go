@@ -112,7 +112,8 @@ func (e *esdtNFTupdate) ProcessBuiltinFunction(
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
 		regulated, drwaErr := evaluateDRWAMetadataUpdate(e.drwaReader, vmInput.Arguments[0], vmInput.CallerAddr, acntSnd)
 		if regulated {
-			drwaGasCost = computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
+			// 4 reads: policy + holder mirror + profile + auditor auth.
+			drwaGasCost = computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 			if vmInput.GasProvided < e.funcGasCost+drwaGasCost {
 				return nil, ErrNotEnoughGas
 			}

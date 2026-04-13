@@ -133,18 +133,17 @@ func (e *esdtTransfer) ProcessBuiltinFunction(
 		return nil, err
 	}
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// Go M-2 fix: Pre-charge maximum DRWA gas before performing state reads.
+		// Pre-charge maximum DRWA gas before performing state reads.
 		// Prevents free trie reads as a DoS vector for regulated tokens.
-		// Max cost: 4 reads (sender policy + sender holder + receiver policy + receiver holder).
-		// DRWA gas model: conservatively pre-charge for 4 trie reads (max case: in-shard
-		// regulated transfer checks both sender and receiver, 2 reads each). Cross-shard
-		// transfers check only one side (2 reads); unused pre-charged gas is returned.
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
+		// Max cost: 8 reads (4 per side: policy + holder mirror + profile + auditor auth).
+		// In-shard regulated transfer checks both sender and receiver.
+		// Cross-shard transfers check only one side (4 reads); unused pre-charged gas is returned.
+		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 8)
 		if !skipGasUse && vmInput.GasProvided < gasToUse+drwaMaxGas {
 			return nil, ErrNotEnoughGas
 		}
 
-		// C-2 fix: When account is nil (cross-shard), we still validate our side.
+		// When account is nil (cross-shard), we still validate our side.
 		// Source shard: acntSnd is present (validate sender), acntDst is nil (skip receiver — destination shard validates).
 		// Destination shard: acntDst is present (validate receiver), acntSnd is nil (skip sender — source shard validated).
 		// This is the correct cross-shard split per spec §11_DRWA_Cross_Shard_Enforcement.
@@ -161,7 +160,7 @@ func (e *esdtTransfer) ProcessBuiltinFunction(
 		if !check.IfNil(acntSnd) {
 			regulated, drwaErr := evaluateDRWASenderTransfer(e.drwaReader, tokenID, vmInput.CallerAddr, acntSnd, e.CurrentRound())
 			if regulated {
-				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
+				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 			}
 			err = drwaErr
 			if err != nil {
@@ -171,7 +170,7 @@ func (e *esdtTransfer) ProcessBuiltinFunction(
 		if !check.IfNil(acntDst) {
 			regulated, drwaErr := evaluateDRWAReceiverTransfer(e.drwaReader, tokenID, vmInput.RecipientAddr, acntDst, e.CurrentRound())
 			if regulated {
-				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
+				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 			}
 			err = drwaErr
 			if err != nil {

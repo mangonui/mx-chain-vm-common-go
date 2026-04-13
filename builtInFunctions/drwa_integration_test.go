@@ -72,7 +72,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWAAllowsApprovedSameShardTransfer
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -82,7 +82,8 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWAAllowsApprovedSameShardTransfer
 	require.NoError(t, err)
 	require.NotNil(t, output)
 	require.Equal(t, vmcommon.Ok, output.ReturnCode)
-	require.Equal(t, uint64(50), output.GasRemaining)
+	// Gas accounting: 10000 - 10(funcGas) - 2*400(DRWA: 4reads * 10fallback * 10units per side) = 9190
+	require.Equal(t, uint64(9190), output.GasRemaining)
 }
 
 func TestESDTTransfer_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing(t *testing.T) {
@@ -112,7 +113,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing(t *tes
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -160,7 +161,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_SkipsDRWAWhenFlagDisabled(t *testin
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -212,7 +213,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSender(t *testing.T) {
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -254,7 +255,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSenderFromBinaryStoredMir
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -300,7 +301,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesWhenHolderMirrorMissing(t
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -351,7 +352,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSenderWhenPolicyPaused(t 
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -407,7 +408,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSenderWhenExpired(t *test
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -454,7 +455,7 @@ func TestESDTNFTTransfer_ProcessBuiltinFunction_DRWADeniesReceiverOnDestination(
 				zeroByteArray,
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 		},
 		RecipientAddr: []byte("destination1"),
 	}
@@ -485,7 +486,7 @@ func TestESDTNFTTransfer_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing(t *
 				zeroByteArray,
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 		},
 		RecipientAddr: []byte("destination1"),
 	}
@@ -594,7 +595,7 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesReceiverOnDestinationCros
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -789,7 +790,7 @@ func TestDRWAIdentityProfileFallbackAllowsTransferWithoutTokenMirror(t *testing.
 	output, err := transferFunc.ProcessBuiltinFunction(sender, receiver, &vmcommon.ContractCallInput{
 		VMInput: vmcommon.VMInput{
 			CallerAddr:  []byte("sender"),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallValue:   big.NewInt(0),
 			CallType:    vm.DirectCall,
 			Arguments: [][]byte{
@@ -828,6 +829,11 @@ func TestDRWAAuditorAuthorizationFallbackAllowsMetadataUpdate(t *testing.T) {
 		StrictAuditorMode:         true,
 	})
 	mustSaveDRWAHolderAuditorAuthorization(t, userAcc, "MRV-NFT-FALLBACK", "audited", true)
+	// GL-4: Metadata updates now enforce KYC/AML — the holder must be compliant.
+	mustSaveDRWAHolder(t, userAcc, "MRV-NFT-FALLBACK", "audited", &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
 
 	regulated, err := evaluateDRWAMetadataUpdate(reader, []byte("MRV-NFT-FALLBACK"), []byte("audited"), userAcc)
 	require.True(t, regulated)
@@ -1090,7 +1096,7 @@ func TestESDTTransferDRWAInvestorClassBlocked(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte(tokenID), big.NewInt(1).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -1143,7 +1149,7 @@ func TestESDTTransferDRWAJurisdictionBlocked(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte(tokenID), big.NewInt(1).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -1197,7 +1203,7 @@ func TestESDTTransferDRWAInvestorClassAndJurisdictionAllowed(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte(tokenID), big.NewInt(1).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -1303,4 +1309,184 @@ func TestMultiESDTNFTTransfer_DRWADestinationOnlyGasAccounting(t *testing.T) { /
 			"unregulated token gas (%d) must be less than regulated token gas (%d)",
 			noRegGasConsumed, drwaGasConsumed)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// MultiESDT denial-rollback regression test
+//
+// Both audit reviewers (round 8) flagged that the Pass1/Pass2 atomicity in
+// multiESDTNFTTransfer.go is structurally enforced but no test exercises the
+// denial-rollback path. The architectural correctness lives at
+// multiESDTNFTTransfer.go:378-407 (source-side Pass1) and
+// multiESDTNFTTransfer.go:174-201 (destination-side). If a future change
+// reordered the validate-before-mutate pattern, no existing test would catch
+// it. This test is the regression guard.
+//
+// Scenario:
+//   - Two regulated tokens, both with the sender KYC-approved.
+//   - Token A's destination is KYC-approved (would pass on its own).
+//   - Token B's destination is KYC-PENDING (would deny on its own).
+//   - Submit a multi-transfer of both tokens in a single envelope.
+//   - Assert: the entire batch reverts. Sender balance for BOTH tokens is
+//     unchanged. Destination has NEITHER token. The denial reason is the
+//     receiver KYC error for token B.
+// ---------------------------------------------------------------------------
+
+func TestESDTNFTMultiTransfer_ProcessBuiltinFunction_DRWADeniesEntireBatchOnOneBadToken(t *testing.T) {
+	t.Parallel()
+
+	const (
+		regulatedTokenA = "GOOD-MULTI"
+		regulatedTokenB = "BAD-MULTI"
+	)
+
+	multiTransfer := createESDTNFTMultiTransferWithMockArguments(0, 1, &mock.GlobalSettingsHandlerStub{})
+	multiTransfer.enableEpochsHandler = drwaEnabledEpochsHandler(ESDTNFTImprovementV1Flag, CheckCorrectTokenIDForTransferRoleFlag)
+	multiTransfer.SetDRWAReader(mustCreateDRWAReader(t, multiTransfer.accounts))
+
+	payableChecker, err := NewPayableCheckFunc(
+		&mock.PayableHandlerStub{
+			IsPayableCalled: func(address []byte) (bool, error) {
+				return true, nil
+			},
+		},
+		&mock.EnableEpochsHandlerStub{
+			IsFlagEnabledCalled: func(flag core.EnableEpochFlag) bool {
+				return flag == FixAsyncCallbackCheckFlag || flag == CheckFunctionArgumentFlag
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, multiTransfer.SetPayableChecker(payableChecker))
+
+	senderAddress := bytes.Repeat([]byte{2}, 32)
+	destinationAddress := bytes.Repeat([]byte{0}, 32)
+	destinationAddress[25] = 1
+
+	// Load and set up the system account with both token policies.
+	systemAcc, err := multiTransfer.accounts.LoadAccount(vmcommon.SystemAccountAddress)
+	require.NoError(t, err)
+	mustSaveDRWATokenPolicy(t, systemAcc.(vmcommon.UserAccountHandler), regulatedTokenA, &drwaTokenPolicyView{
+		DRWAEnabled: true,
+	})
+	mustSaveDRWATokenPolicy(t, systemAcc.(vmcommon.UserAccountHandler), regulatedTokenB, &drwaTokenPolicyView{
+		DRWAEnabled: true,
+	})
+	require.NoError(t, multiTransfer.accounts.SaveAccount(systemAcc))
+
+	// Load sender and seed initial balances + compliant DRWA holder mirrors
+	// for both tokens.
+	senderAccount, err := multiTransfer.accounts.LoadAccount(senderAddress)
+	require.NoError(t, err)
+	createESDTNFTToken([]byte(regulatedTokenA), core.Fungible, 0, big.NewInt(10), multiTransfer.marshaller, senderAccount.(vmcommon.UserAccountHandler))
+	createESDTNFTToken([]byte(regulatedTokenB), core.Fungible, 0, big.NewInt(10), multiTransfer.marshaller, senderAccount.(vmcommon.UserAccountHandler))
+	mustSaveDRWAHolder(t, senderAccount.(vmcommon.UserAccountHandler), regulatedTokenA, string(senderAddress), &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	mustSaveDRWAHolder(t, senderAccount.(vmcommon.UserAccountHandler), regulatedTokenB, string(senderAddress), &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	require.NoError(t, multiTransfer.accounts.SaveAccount(senderAccount))
+
+	// Load destination. Token A receiver: compliant. Token B receiver: KYC pending (denial).
+	destinationAccount, err := multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+	mustSaveDRWAHolder(t, destinationAccount.(vmcommon.UserAccountHandler), regulatedTokenA, string(destinationAddress), &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	mustSaveDRWAHolder(t, destinationAccount.(vmcommon.UserAccountHandler), regulatedTokenB, string(destinationAddress), &drwaHolderMirrorView{
+		KYCStatus: "pending",
+		AMLStatus: "approved",
+	})
+	require.NoError(t, multiTransfer.accounts.SaveAccount(destinationAccount))
+	_, _ = multiTransfer.accounts.Commit()
+
+	// Reload all three accounts after commit.
+	systemAcc, err = multiTransfer.accounts.LoadAccount(vmcommon.SystemAccountAddress)
+	require.NoError(t, err)
+	_ = systemAcc
+	senderAccount, err = multiTransfer.accounts.LoadAccount(senderAddress)
+	require.NoError(t, err)
+	destinationAccount, err = multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+
+	// Snapshot pre-call balances on the sender to assert atomicity.
+	preCallTokenABalance := getESDTBalance(t, multiTransfer.marshaller, senderAccount.(vmcommon.UserAccountHandler), []byte(regulatedTokenA), 0)
+	preCallTokenBBalance := getESDTBalance(t, multiTransfer.marshaller, senderAccount.(vmcommon.UserAccountHandler), []byte(regulatedTokenB), 0)
+	require.Equal(t, big.NewInt(10), preCallTokenABalance, "sender token A pre-call balance")
+	require.Equal(t, big.NewInt(10), preCallTokenBBalance, "sender token B pre-call balance")
+
+	// Construct a same-shard multi-transfer of two tokens: A then B.
+	// Argument layout (per multiESDTNFTTransfer.go): [destAddr, numTransfers,
+	// tokenA, nonceA, valueA, tokenB, nonceB, valueB].
+	vmInput := &vmcommon.ContractCallInput{
+		VMInput: vmcommon.VMInput{
+			CallerAddr:  senderAddress,
+			CallValue:   big.NewInt(0),
+			GasProvided: 200000,
+			Arguments: [][]byte{
+				destinationAddress,
+				big.NewInt(2).Bytes(),
+				[]byte(regulatedTokenA),
+				big.NewInt(0).Bytes(),
+				big.NewInt(1).Bytes(),
+				[]byte(regulatedTokenB),
+				big.NewInt(0).Bytes(),
+				big.NewInt(1).Bytes(),
+			},
+		},
+		RecipientAddr: senderAddress,
+	}
+
+	// Execute. Expect denial because token B's receiver is not KYC-approved.
+	output, err := multiTransfer.ProcessBuiltinFunction(senderAccount.(vmcommon.UserAccountHandler), destinationAccount.(vmcommon.UserAccountHandler), vmInput)
+	require.Error(t, err, "multi-transfer with one bad token must be denied")
+	require.ErrorIs(t, err, errDRWAKYCRequiredReceiver, "denial reason must be receiver KYC for token B")
+	require.Nil(t, output, "no VMOutput on denial")
+
+	// Atomicity assertion: reload sender and destination, verify NEITHER
+	// token's balance changed. Token A must NOT have been transferred even
+	// though token A on its own would have passed compliance — this is the
+	// load-bearing assertion for Pass1/Pass2 atomicity.
+	senderAccountAfter, err := multiTransfer.accounts.LoadAccount(senderAddress)
+	require.NoError(t, err)
+	postCallTokenABalance := getESDTBalance(t, multiTransfer.marshaller, senderAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenA), 0)
+	postCallTokenBBalance := getESDTBalance(t, multiTransfer.marshaller, senderAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenB), 0)
+	require.Equal(t, big.NewInt(10), postCallTokenABalance, "sender token A balance must be unchanged after atomic rollback")
+	require.Equal(t, big.NewInt(10), postCallTokenBBalance, "sender token B balance must be unchanged after atomic rollback")
+
+	destinationAccountAfter, err := multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+	destTokenABalance := getESDTBalance(t, multiTransfer.marshaller, destinationAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenA), 0)
+	destTokenBBalance := getESDTBalance(t, multiTransfer.marshaller, destinationAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenB), 0)
+	require.Equal(t, big.NewInt(0), destTokenABalance, "destination must NOT have received token A (atomic rollback)")
+	require.Equal(t, big.NewInt(0), destTokenBBalance, "destination must NOT have received token B (denied directly)")
+}
+
+// getESDTBalance is a small helper that reads the ESDT balance for a given
+// token + nonce from a user account. Returns big.NewInt(0) if no balance entry
+// exists. Used by the atomicity assertion above.
+func getESDTBalance(t *testing.T, marshaller vmcommon.Marshalizer, account vmcommon.UserAccountHandler, tokenID []byte, nonce uint64) *big.Int {
+	t.Helper()
+
+	esdtTokenKey := append([]byte(core.ProtectedKeyPrefix+core.ESDTKeyIdentifier), tokenID...)
+	if nonce > 0 {
+		nonceBytes := big.NewInt(0).SetUint64(nonce).Bytes()
+		esdtTokenKey = append(esdtTokenKey, nonceBytes...)
+	}
+
+	value, _, err := account.AccountDataHandler().RetrieveValue(esdtTokenKey)
+	if err != nil || len(value) == 0 {
+		return big.NewInt(0)
+	}
+
+	esdtData := &esdt.ESDigitalToken{}
+	err = marshaller.Unmarshal(esdtData, value)
+	if err != nil || esdtData.Value == nil {
+		return big.NewInt(0)
+	}
+	return esdtData.Value
 }
