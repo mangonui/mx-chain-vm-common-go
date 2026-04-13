@@ -3,6 +3,7 @@ package builtInFunctions
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/multiversx/mx-chain-core-go/core"
@@ -14,6 +15,7 @@ import (
 type drwaReaderStub struct {
 	getTokenPolicy func(tokenIdentifier []byte) (*drwaTokenPolicyView, error)
 	getHolder      func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error)
+	getAssetRecord func(tokenIdentifier []byte) (*drwaAssetRecordView, error)
 }
 
 func (d *drwaReaderStub) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
@@ -22,6 +24,14 @@ func (d *drwaReaderStub) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolic
 
 func (d *drwaReaderStub) GetHolderMirror(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
 	return d.getHolder(tokenIdentifier, address, currentAccount)
+}
+
+func (d *drwaReaderStub) GetAssetRecord(tokenIdentifier []byte) (*drwaAssetRecordView, error) {
+	if d.getAssetRecord != nil {
+		return d.getAssetRecord(tokenIdentifier)
+	}
+	// Default: no asset record (token not regulated)
+	return nil, nil
 }
 
 func TestCheckDRWAWrappersAndRegulatedTokenEvaluation(t *testing.T) {
@@ -329,4 +339,162 @@ func TestDRWAAccountsReaderLoadUserAccountPropagatesLoadErrors(t *testing.T) {
 	account, err := reader.loadUserAccount([]byte("missing"), nil)
 	require.Nil(t, account)
 	require.EqualError(t, err, "load failed")
+}
+
+// ---------------------------------------------------------------------------
+// SetDRWAReadGasUnits tests (0% → covered)
+// ---------------------------------------------------------------------------
+
+// NOTE: These tests must NOT use t.Parallel() — they mutate a shared atomic.
+func TestSetDRWAReadGasUnits_DefaultValue(t *testing.T) {
+	// Reset to default before checking.
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+	got := drwaReadGasUnitsAtomic.Load()
+	require.Equal(t, uint64(drwaReadGasUnitsDefault), got)
+}
+
+func TestSetDRWAReadGasUnits_ChangesValue(t *testing.T) {
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+	SetDRWAReadGasUnits(42)
+	got := drwaReadGasUnitsAtomic.Load()
+	require.Equal(t, uint64(42), got)
+	// Restore default for other tests.
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+}
+
+func TestSetDRWAReadGasUnits_RejectsZero(t *testing.T) {
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+	SetDRWAReadGasUnits(0)
+	got := drwaReadGasUnitsAtomic.Load()
+	require.Equal(t, uint64(drwaReadGasUnitsDefault), got, "zero must be rejected")
+}
+
+func TestSetDRWAReadGasUnits_ConcurrentAccess(t *testing.T) {
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+	const goroutines = 50
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	// Writers
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				SetDRWAReadGasUnits(uint64(id + 1))
+			}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				v := drwaReadGasUnitsAtomic.Load()
+				require.NotZero(t, v)
+			}
+		}()
+	}
+
+	wg.Wait()
+	// Restore default for other tests.
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+}
+
+// ---------------------------------------------------------------------------
+// checkDRWAMetadataUpdate tests (0% → covered)
+// ---------------------------------------------------------------------------
+
+func TestCheckDRWAMetadataUpdate_RegulatedTokenEnforces(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return &drwaTokenPolicyView{
+				DRWAEnabled:               true,
+				MetadataProtectionEnabled: true,
+				StrictAuditorMode:         true,
+			}, nil
+		},
+		getHolder: func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+			return &drwaHolderMirrorView{
+				KYCStatus:         "approved",
+				AMLStatus:         "approved",
+				AuditorAuthorized: true,
+			}, nil
+		},
+	}
+
+	err := checkDRWAMetadataUpdate(reader, []byte("REG-1"), []byte("caller"), nil)
+	require.NoError(t, err)
+}
+
+func TestCheckDRWAMetadataUpdate_UnregulatedTokenPasses(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return nil, nil // not regulated
+		},
+		getHolder: func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+			t.Fatal("holder should not be loaded for unregulated token")
+			return nil, nil
+		},
+	}
+
+	err := checkDRWAMetadataUpdate(reader, []byte("PLAIN-1"), []byte("caller"), nil)
+	require.NoError(t, err)
+}
+
+func TestCheckDRWAMetadataUpdate_NilReaderPasses(t *testing.T) {
+	t.Parallel()
+
+	err := checkDRWAMetadataUpdate(nil, []byte("ANY-1"), []byte("caller"), nil)
+	require.NoError(t, err)
+}
+
+func TestCheckDRWAMetadataUpdate_KYCDenied(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return &drwaTokenPolicyView{
+				DRWAEnabled:               true,
+				MetadataProtectionEnabled: true,
+			}, nil
+		},
+		getHolder: func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+			return &drwaHolderMirrorView{
+				KYCStatus: "pending",
+				AMLStatus: "approved",
+			}, nil
+		},
+	}
+
+	err := checkDRWAMetadataUpdate(reader, []byte("REG-1"), []byte("caller"), nil)
+	require.ErrorIs(t, err, errDRWAKYCRequiredSender)
+}
+
+func TestCheckDRWAMetadataUpdate_AMLDenied(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return &drwaTokenPolicyView{
+				DRWAEnabled:               true,
+				MetadataProtectionEnabled: true,
+			}, nil
+		},
+		getHolder: func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+			return &drwaHolderMirrorView{
+				KYCStatus: "approved",
+				AMLStatus: "blocked",
+			}, nil
+		},
+	}
+
+	err := checkDRWAMetadataUpdate(reader, []byte("REG-1"), []byte("caller"), nil)
+	require.ErrorIs(t, err, errDRWAAMLBlockedSender)
 }

@@ -149,9 +149,10 @@ func (e *esdtNFTTransfer) ProcessBuiltinFunction(
 		return nil, ErrInvalidRcvAddr
 	}
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// #9 fix: Pre-charge DRWA gas before state reads (matches esdtTransfer.go pattern).
+		// Pre-charge DRWA gas before state reads (matches esdtTransfer.go pattern).
 		// In cross-shard NFT path, only receiver is checked (sender is nil).
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
+		// 4 reads per side: policy + holder mirror + profile + auditor auth.
+		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 		if vmInput.GasProvided < drwaMaxGas {
 			return nil, ErrNotEnoughGas
 		}
@@ -247,8 +248,9 @@ func (e *esdtNFTTransfer) processNFTTransferOnSenderShard(
 	skipGasUse := noGasUseIfReturnCallAfterErrorWithFlag(e.enableEpochsHandler, vmInput)
 	gasToUse := e.funcGasCost
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// #9 fix: pre-charge max DRWA gas before state reads (sender-side)
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
+		// pre-charge max DRWA gas before state reads (sender-side)
+		// 4 reads per side: policy + holder mirror + profile + auditor auth.
+		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 		if !skipGasUse && vmInput.GasProvided < gasToUse+drwaMaxGas {
 			return nil, ErrNotEnoughGas
 		}
@@ -288,6 +290,57 @@ func (e *esdtNFTTransfer) processNFTTransferOnSenderShard(
 	if isCheckTransferFlagEnabled && quantityToTransfer.Cmp(zero) <= 0 {
 		return nil, ErrInvalidNFTQuantity
 	}
+
+	// Run ALL compliance checks BEFORE any balance mutation.
+	// Previously, receiver DRWA check and limited-transfer role check ran after
+	// the sender balance was already decremented, causing irreversible state
+	// corruption when a late check failed.
+
+	// Load destination account early so compliance checks can inspect it.
+	var userAccount vmcommon.UserAccountHandler
+	if e.shardCoordinator.SelfId() == e.shardCoordinator.ComputeId(dstAddress) {
+		accountHandler, errLoad := e.accounts.LoadAccount(dstAddress)
+		if errLoad != nil {
+			return nil, errLoad
+		}
+
+		var ok bool
+		userAccount, ok = accountHandler.(vmcommon.UserAccountHandler)
+		if !ok {
+			return nil, ErrWrongTypeAssertion
+		}
+
+		// Receiver DRWA check moved before balance deduction.
+		if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
+			regulated, drwaErr := evaluateDRWAReceiverTransfer(e.drwaReader, vmInput.Arguments[0], dstAddress, userAccount, e.CurrentRound())
+			if regulated {
+				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
+			}
+			err = drwaErr
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		err = e.payableHandler.CheckPayable(vmInput, dstAddress, core.MinLenArgumentsESDTNFTTransfer)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Limited transfer role check moved before balance deduction.
+	tokenID := esdtTokenKey
+	if e.enableEpochsHandler.IsFlagEnabled(CheckCorrectTokenIDForTransferRoleFlag) {
+		tokenID = tickerID
+	}
+
+	err = checkIfTransferCanHappenWithLimitedTransfer(tokenID, esdtTokenKey, acntSnd.AddressBytes(), dstAddress, e.globalSettingsHandler, e.rolesHandler, acntSnd, userAccount, vmInput.ReturnCallAfterError)
+	if err != nil {
+		return nil, err
+	}
+
+	// --- All compliance checks passed. Now perform balance mutations. ---
+
 	esdtData.Value.Sub(esdtData.Value, quantityToTransfer)
 
 	properties := vmcommon.NftSaveArgs{
@@ -302,33 +355,7 @@ func (e *esdtNFTTransfer) processNFTTransferOnSenderShard(
 
 	esdtData.Value.Set(quantityToTransfer)
 
-	var userAccount vmcommon.UserAccountHandler
-	if e.shardCoordinator.SelfId() == e.shardCoordinator.ComputeId(dstAddress) {
-		accountHandler, errLoad := e.accounts.LoadAccount(dstAddress)
-		if errLoad != nil {
-			return nil, errLoad
-		}
-
-		var ok bool
-		userAccount, ok = accountHandler.(vmcommon.UserAccountHandler)
-		if !ok {
-			return nil, ErrWrongTypeAssertion
-		}
-		if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-			regulated, drwaErr := evaluateDRWAReceiverTransfer(e.drwaReader, vmInput.Arguments[0], dstAddress, userAccount, e.CurrentRound())
-			if regulated {
-				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 2)
-			}
-			err = drwaErr
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		err = e.payableHandler.CheckPayable(vmInput, dstAddress, core.MinLenArgumentsESDTNFTTransfer)
-		if err != nil {
-			return nil, err
-		}
+	if !check.IfNil(userAccount) {
 		err = e.addNFTToDestination(
 			vmInput.CallerAddr,
 			dstAddress,
@@ -356,16 +383,6 @@ func (e *esdtNFTTransfer) processNFTTransferOnSenderShard(
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	tokenID := esdtTokenKey
-	if e.enableEpochsHandler.IsFlagEnabled(CheckCorrectTokenIDForTransferRoleFlag) {
-		tokenID = tickerID
-	}
-
-	err = checkIfTransferCanHappenWithLimitedTransfer(tokenID, esdtTokenKey, acntSnd.AddressBytes(), dstAddress, e.globalSettingsHandler, e.rolesHandler, acntSnd, userAccount, vmInput.ReturnCallAfterError)
-	if err != nil {
-		return nil, err
 	}
 
 	vmOutput := &vmcommon.VMOutput{

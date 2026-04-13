@@ -111,7 +111,7 @@ func TestNonDRWAESDTTransfer_NoDRWAReader(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte("PLAIN-1"), big.NewInt(3).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -152,7 +152,7 @@ func TestNonDRWAESDTTransfer_NoPolicy(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte("PLAIN-2"), big.NewInt(5).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -198,7 +198,7 @@ func TestNonDRWAESDTTransfer_DRWADisabledPolicy(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte("PLAN-3"), big.NewInt(2).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -288,7 +288,7 @@ func TestNonDRWAESDTTransfer_GasUnchanged(t *testing.T) {
 			CallerAddr:  []byte("sender"),
 			Arguments:   [][]byte{[]byte("PLAIN-GAS"), big.NewInt(1).Bytes()},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),
@@ -297,7 +297,8 @@ func TestNonDRWAESDTTransfer_GasUnchanged(t *testing.T) {
 	output, err := transferFunc.ProcessBuiltinFunction(sender, receiver, vmInput)
 	require.NoError(t, err)
 	require.Equal(t, vmcommon.Ok, output.ReturnCode)
-	// funcGasCost=10, GasProvided=100 → GasRemaining should be 90.
-	require.Equal(t, uint64(90), output.GasRemaining,
+	// funcGasCost=10, GasProvided=10000 → GasRemaining should be 9990.
+	// Non-regulated token: no DRWA gas consumed, only funcGasCost deducted.
+	require.Equal(t, uint64(9990), output.GasRemaining,
 		"non-DRWA transfer gas cost must equal funcGasCost only")
 }

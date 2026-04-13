@@ -16,6 +16,10 @@ const (
 	drwaGateMetricDeniedClass            = "gate_denied_investor_class"
 	drwaGateMetricDeniedJurisdiction     = "gate_denied_jurisdiction"
 	drwaGateMetricDeniedAuditor          = "gate_denied_auditor_required"
+	drwaGateMetricDeniedTravelRule       = "gate_denied_travel_rule_required"
+	drwaGateMetricDeniedSanctions        = "gate_denied_sanctions_match"
+	drwaGateMetricDeniedWindDown         = "gate_denied_wind_down_active"
+	drwaGateMetricDeniedPolicyNotSynced  = "gate_denied_policy_not_synced"
 	drwaGateMetricDecodeFailure          = "gate_decode_failure"
 	drwaGateMetricDecodeFailureJSON      = "gate_decode_failure_json"
 	drwaGateMetricDecodeFailureBinary    = "gate_decode_failure_binary"
@@ -64,6 +68,14 @@ func drwaDenialMetric(code error) string {
 		return drwaGateMetricDeniedJurisdiction
 	case errDRWAAuditorRequired:
 		return drwaGateMetricDeniedAuditor
+	case errDRWATravelRuleRequired:
+		return drwaGateMetricDeniedTravelRule
+	case errDRWASanctionsMatch:
+		return drwaGateMetricDeniedSanctions
+	case errDRWAWindDownActive:
+		return drwaGateMetricDeniedWindDown
+	case errDRWAPolicyNotSynced:
+		return drwaGateMetricDeniedPolicyNotSynced
 	default:
 		return ""
 	}

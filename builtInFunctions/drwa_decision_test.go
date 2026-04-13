@@ -75,6 +75,142 @@ func TestValidateDRWAReceiverBranches(t *testing.T) {
 	}
 }
 
+// Tests for Travel Rule, Sanctions, Wind-down, and LockUntilRound enforcement.
+
+func TestValidateDRWASenderDeniedWindDownActive(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, WindDownInitiated: true}
+	holder := &drwaHolderMirrorView{KYCStatus: "approved", AMLStatus: "approved"}
+	d := validateDRWASender(policy, holder, 100)
+	if d.DenialCode != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderDeniedTravelRuleRequired(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, TravelRuleRequired: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:          "approved",
+		AMLStatus:          "approved",
+		TravelRuleAttested: false,
+	}
+	d := validateDRWASender(policy, holder, 100)
+	if d.DenialCode != errDRWATravelRuleRequired {
+		t.Fatalf("expected travel rule denial, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderAllowedTravelRuleAttested(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, TravelRuleRequired: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:          "approved",
+		AMLStatus:          "approved",
+		TravelRuleAttested: true,
+	}
+	d := validateDRWASender(policy, holder, 100)
+	if !d.Allowed {
+		t.Fatalf("expected allowed with travel rule attested, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderDeniedSanctionsMatch(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, SanctionsScreeningEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:        "approved",
+		AMLStatus:        "approved",
+		SanctionsCleared: false,
+	}
+	d := validateDRWASender(policy, holder, 100)
+	if d.DenialCode != errDRWASanctionsMatch {
+		t.Fatalf("expected sanctions denial, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderAllowedSanctionsCleared(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, SanctionsScreeningEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:        "approved",
+		AMLStatus:        "approved",
+		SanctionsCleared: true,
+	}
+	d := validateDRWASender(policy, holder, 100)
+	if !d.Allowed {
+		t.Fatalf("expected allowed with sanctions cleared, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderDeniedLockUntilRound(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: 500,
+	}
+	// Current round 100 < lock until 500 — should deny
+	d := validateDRWASender(policy, holder, 100)
+	if d.DenialCode != errDRWATransferLocked {
+		t.Fatalf("expected transfer locked (SEC Rule 144), got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderAllowedLockUntilRoundExpired(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: 500,
+	}
+	// Current round 600 > lock until 500 — should allow
+	d := validateDRWASender(policy, holder, 600)
+	if !d.Allowed {
+		t.Fatalf("expected allowed after lock period expired, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWAReceiverDeniedWindDownActive(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, WindDownInitiated: true}
+	holder := &drwaHolderMirrorView{KYCStatus: "approved", AMLStatus: "approved"}
+	d := validateDRWAReceiver(policy, holder, 100)
+	if d.DenialCode != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial on receiver, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWAReceiverDeniedTravelRuleRequired(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, TravelRuleRequired: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:          "approved",
+		AMLStatus:          "approved",
+		TravelRuleAttested: false,
+	}
+	d := validateDRWAReceiver(policy, holder, 100)
+	if d.DenialCode != errDRWATravelRuleRequired {
+		t.Fatalf("expected travel rule denial on receiver, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWAReceiverDeniedSanctionsMatch(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, SanctionsScreeningEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:        "approved",
+		AMLStatus:        "approved",
+		SanctionsCleared: false,
+	}
+	d := validateDRWAReceiver(policy, holder, 100)
+	if d.DenialCode != errDRWASanctionsMatch {
+		t.Fatalf("expected sanctions denial on receiver, got %v", d.DenialCode)
+	}
+}
+
 func TestValidateDRWAMetadataUpdateBranches(t *testing.T) {
 	t.Parallel()
 
@@ -110,5 +246,64 @@ func TestValidateDRWAMetadataUpdateBranches(t *testing.T) {
 	}, true)
 	if !allowed.Allowed {
 		t.Fatalf("expected auditor-authorized metadata update to pass")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F2 (closes N1): LockUntilRound deny-by-default when round is unknown
+// ---------------------------------------------------------------------------
+
+// TestValidateDRWASenderDeniesLockUntilRoundWhenRoundZero is the regression
+// guard for N1. Before F2, the LockUntilRound check had an explicit `now > 0`
+// guard that silently bypassed SEC Rule 144 enforcement when the blockchain
+// hook returned a zero round. The expiry checks already deny-by-default in
+// that case; LockUntilRound must do the same to maintain consistent
+// fail-closed semantics for time-based restrictions.
+func TestValidateDRWASenderDeniesLockUntilRoundWhenRoundZero(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: 1000,
+	}
+	d := validateDRWASender(policy, holder, 0)
+	if d.DenialCode != errDRWATransferLocked {
+		t.Fatalf("expected transfer locked deny-by-default at round=0, got %v", d.DenialCode)
+	}
+}
+
+// TestValidateDRWASenderRoundZeroAllowsHolderWithoutTimeBasedRestrictions
+// asserts the F2 fix is scoped: a holder with no expiry and no LockUntilRound
+// continues to be allowed at round=0. This preserves the legitimate test path
+// that uses round=0 as a "round-irrelevant" sentinel.
+func TestValidateDRWASenderRoundZeroAllowsHolderWithoutTimeBasedRestrictions(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	}
+	d := validateDRWASender(policy, holder, 0)
+	if !d.Allowed {
+		t.Fatalf("expected allow for holder without time-based restrictions at round=0, got %v", d.DenialCode)
+	}
+}
+
+// TestValidateDRWASenderLockUntilRoundStillEnforcedDuringNormalOperation is a
+// regression guard ensuring the F2 fix did not change behavior in the normal
+// path. With round > 0 and round < LockUntilRound, the existing check fires
+// and the holder is denied with the same error code.
+func TestValidateDRWASenderLockUntilRoundStillEnforcedDuringNormalOperation(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: 1000,
+	}
+	d := validateDRWASender(policy, holder, 500)
+	if d.DenialCode != errDRWATransferLocked {
+		t.Fatalf("expected transfer locked at round=500 < lock=1000, got %v", d.DenialCode)
 	}
 }

@@ -72,7 +72,7 @@ func BenchmarkESDTTransfer_ProcessBuiltinFunction_DRWAAllowed(b *testing.B) {
 				big.NewInt(1).Bytes(),
 			},
 			CallValue:   big.NewInt(0),
-			GasProvided: 100,
+			GasProvided: 10000,
 			CallType:    vm.DirectCall,
 		},
 		RecipientAddr: []byte("receiver"),

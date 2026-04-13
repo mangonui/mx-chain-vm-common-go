@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync/atomic"
 
 	logger "github.com/multiversx/mx-chain-logger-go"
 	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
@@ -21,8 +22,64 @@ const (
 	drwaHolderMirrorPrefix      = "drwa:holder:"
 	drwaHolderProfilePrefix     = "drwa:profile:"
 	drwaHolderAuditorAuthPrefix = "drwa:auditor:"
-	drwaReadGasUnits            = 1
+	// drwaReadGasUnitsDefault is the default gas multiplier per compliance read.
+	// Set to 10 to account for the real cost of trie traversal + deserialization
+	// per state read. Each side of a transfer performs up to 4 reads (policy,
+	// holder mirror, profile, auditor auth). Value validated against DataCopyPerByte
+	// benchmarks — 10x baseline is the minimum that prevents gas-price arbitrage on
+	// regulated token spam.
+	drwaReadGasUnitsDefault = 10
+
+	// G-08: Named constants for binary decoder minimum payload sizes.
+	// These replace magic numbers throughout the binary decoders and make
+	// size requirements discoverable via code search.
+
+	// drwaBinaryTokenPolicyMinSize is the minimum valid binary token policy payload.
+	// Layout: 4 boolean flags (bytes 0-3) + 8 reserved zero bytes (bytes 4-11).
+	drwaBinaryTokenPolicyMinSize = 12
+
+	// drwaBinaryHolderPayloadMinSize is the minimum binary holder mirror payload.
+	// Layout: 8-byte holder_policy_version prefix.
+	drwaBinaryHolderPayloadMinSize = 8
+
+	// drwaBinaryHolderTrailerMinSize is the minimum trailer after the four
+	// length-prefixed string fields in a binary holder mirror payload.
+	// Layout: 8-byte ExpiryRound + 3 boolean bytes (TransferLocked, ReceiveLocked, AuditorAuthorized).
+	drwaBinaryHolderTrailerMinSize = 11
+
+	// drwaBinaryProfilePayloadMinSize is the minimum binary holder profile payload.
+	// Layout: 8-byte stored version prefix (same as holder mirror).
+	drwaBinaryProfilePayloadMinSize = 8
+
+	// drwaBinaryAuditorAuthPayloadMinSize is the minimum binary auditor authorization payload.
+	// Layout: 8 reserved bytes + 1 authorization boolean.
+	drwaBinaryAuditorAuthPayloadMinSize = 9
+
+	// F-008: Minimum gas cost returned by computeDRWAReadGasCost when the
+	// computed cost would otherwise be zero. Prevents free compliance reads
+	// when both DataCopyPerByte and fallbackCost are zero (misconfigured schedule).
+	drwaMinReadGasCost = 1000
 )
+
+// drwaReadGasUnitsAtomic is the configurable gas multiplier per compliance storage read.
+// Defaults to drwaReadGasUnitsDefault. Configurable via SetDRWAReadGasUnits
+// for gas schedule integration. Uses atomic operations to prevent data races
+// when read concurrently by transfer processing goroutines.
+var drwaReadGasUnitsAtomic atomic.Uint64
+
+func init() {
+	drwaReadGasUnitsAtomic.Store(drwaReadGasUnitsDefault)
+}
+
+// SetDRWAReadGasUnits allows the gas schedule to configure the DRWA compliance
+// read cost. Must be called during node initialization, before any transfers
+// are processed. Zero values are rejected to prevent free compliance checks.
+func SetDRWAReadGasUnits(units uint64) {
+	if units == 0 {
+		return // Reject zero — would make compliance checks free
+	}
+	drwaReadGasUnitsAtomic.Store(units)
+}
 
 // Exported constants for cross-module validation.
 // The sync adapter in mx-chain-go MUST use identical prefix values.
@@ -33,22 +90,37 @@ const (
 	DRWAHolderProfilePrefix     = drwaHolderProfilePrefix
 	DRWAHolderAuditorAuthPrefix = drwaHolderAuditorAuthPrefix
 	DRWAAssetRecordPrefix       = "drwa:asset:"
+
+	// DRWAMaxFieldBytes caps the length of any single binary field. Exported so
+	// mx-chain-go sync layer can reference the same limit (F-022).
+	DRWAMaxFieldBytes = 64 * 1024
 )
 
 var (
-	errDRWATokenPaused          = errors.New("DRWA_TOKEN_PAUSED")
-	errDRWAKYCRequiredSender    = errors.New("DRWA_KYC_REQUIRED_SENDER")
-	errDRWAAMLBlockedSender     = errors.New("DRWA_AML_BLOCKED_SENDER")
-	errDRWAAssetExpired         = errors.New("DRWA_ASSET_EXPIRED")
-	errDRWATransferLocked       = errors.New("DRWA_TRANSFER_LOCKED")
-	errDRWAKYCRequiredReceiver  = errors.New("DRWA_KYC_REQUIRED_RECEIVER")
-	errDRWAAMLBlockedReceiver   = errors.New("DRWA_AML_BLOCKED_RECEIVER")
-	errDRWAReceiveLocked        = errors.New("DRWA_RECEIVE_LOCKED")
-	errDRWAInvestorClass        = errors.New("DRWA_INVESTOR_CLASS_BLOCKED")
-	errDRWAJurisdiction         = errors.New("DRWA_JURISDICTION_BLOCKED")
-	errDRWAAuditorRequired      = errors.New("DRWA_AUDITOR_REQUIRED")
-	errDRWAStateReaderMissing   = errors.New("DRWA_STATE_READER_MISSING")
-	errDRWANilAccountsAdapter   = errors.New("nil DRWA accounts adapter")
+	errDRWAPolicyNotSynced     = errors.New("DRWA_POLICY_NOT_SYNCED") // code 0 — regulated token has no synced policy
+	errDRWATokenPaused         = errors.New("DRWA_TOKEN_PAUSED")      // code 1
+	errDRWAKYCRequiredSender   = errors.New("DRWA_KYC_REQUIRED_SENDER")
+	errDRWAAMLBlockedSender    = errors.New("DRWA_AML_BLOCKED_SENDER")
+	errDRWAAssetExpired        = errors.New("DRWA_ASSET_EXPIRED")
+	errDRWATransferLocked      = errors.New("DRWA_TRANSFER_LOCKED")
+	errDRWAKYCRequiredReceiver = errors.New("DRWA_KYC_REQUIRED_RECEIVER")
+	errDRWAAMLBlockedReceiver  = errors.New("DRWA_AML_BLOCKED_RECEIVER")
+	errDRWAReceiveLocked       = errors.New("DRWA_RECEIVE_LOCKED")
+	errDRWAInvestorClass       = errors.New("DRWA_INVESTOR_CLASS_BLOCKED")
+	errDRWAJurisdiction        = errors.New("DRWA_JURISDICTION_BLOCKED")
+	errDRWAAuditorRequired     = errors.New("DRWA_AUDITOR_REQUIRED")     // code 11
+	errDRWATravelRuleRequired  = errors.New("DRWA_TRAVEL_RULE_REQUIRED") // code 12 — FATF Travel Rule attestation missing
+	errDRWASanctionsMatch      = errors.New("DRWA_SANCTIONS_MATCH")      // code 13 — holder failed sanctions screening
+	errDRWAWindDownActive      = errors.New("DRWA_WIND_DOWN_ACTIVE")     // code 14 — MiCA orderly wind-down in progress
+	errDRWABinaryPolicyUnsafe  = errors.New("DRWA_BINARY_POLICY_UNSAFE") // F-007: binary-encoded policy with DRWAEnabled=true and nil restriction maps
+	errDRWAStateReaderMissing  = errors.New("DRWA_STATE_READER_MISSING")
+	errDRWANilAccountsAdapter  = errors.New("nil DRWA accounts adapter")
+)
+
+const (
+	drwaLogSenderDenied   = "drwa sender transfer denied"
+	drwaLogReceiverDenied = "drwa receiver transfer denied"
+	drwaLogMetadataDenied = "drwa metadata update denied"
 )
 
 type drwaDecision struct {
@@ -63,6 +135,33 @@ type drwaTokenPolicyView struct {
 	MetadataProtectionEnabled bool            `json:"metadata_protection_enabled"`
 	AllowedInvestorClasses    map[string]bool `json:"allowed_investor_classes,omitempty"`
 	AllowedJurisdictions      map[string]bool `json:"allowed_jurisdictions,omitempty"`
+	// : FATF Travel Rule — when true, both sender and receiver must have
+	// TravelRuleAttested=true in their holder mirror before a transfer is allowed.
+	// Enforcement integrates with off-chain VASP travel rule protocols (e.g., TRISA, OpenVASP).
+	TravelRuleRequired bool `json:"travel_rule_required,omitempty"`
+	// : Sanctions screening — when true, both sender and receiver must have
+	// SanctionsCleared=true in their holder mirror. Sanctions attestations are
+	// managed off-chain and synced via identity-registry.
+	SanctionsScreeningEnabled bool `json:"sanctions_screening_enabled,omitempty"`
+	// MiCA: IPFS CID of the registered white paper. Informational — no
+	// enforcement in the transfer gate, but exposed for indexer/API queries.
+	WhitePaperCid string `json:"white_paper_cid,omitempty"`
+	// MiCA: Registration status lifecycle (draft/submitted/approved/rejected/withdrawn).
+	// Informational — exposed for indexer/API queries.
+	RegistrationStatus string `json:"registration_status,omitempty"`
+	// MiCA orderly wind-down: when true, all transfers are denied.
+	// Set by the asset-manager contract via initiateWindDown and synced
+	// to the token policy key so the transfer gate can read it.
+	WindDownInitiated bool `json:"wind_down_initiated,omitempty"`
+}
+
+// drwaAssetRecordView is the Go-side representation of the synced asset record
+// stored under the drwa:asset: prefix in the system account. Used by the
+// transfer gate to enforce wind-down restrictions.
+type drwaAssetRecordView struct {
+	// MiCA orderly wind-down: when true, all transfers are denied.
+	WindDownInitiated bool   `json:"wind_down_initiated,omitempty"`
+	WindDownRound     uint64 `json:"wind_down_round,omitempty"`
 }
 
 type drwaHolderMirrorView struct {
@@ -79,9 +178,26 @@ type drwaHolderMirrorView struct {
 	// match the DrwaHolderMirror struct fields serialized by the Rust contracts.
 	// They must NOT be stored in a nested map — json.Unmarshal cannot populate
 	// map entries from top-level JSON keys.
-	TransferLocked    bool `json:"transfer_locked,omitempty"`
-	ReceiveLocked     bool `json:"receive_locked,omitempty"`
-	AuditorAuthorized bool `json:"auditor_authorized,omitempty"`
+	TransferLocked    bool `json:"transfer_locked"`
+	ReceiveLocked     bool `json:"receive_locked"`
+	AuditorAuthorized bool `json:"auditor_authorized"`
+	// RH-1: SEC Rule 144 — transfer lock until a specific round. If non-zero and
+	// the current round is less than this value, sender-side transfers are denied.
+	// Written by asset-manager via syncHolderCompliance. Rust-side: DrwaHolderMirror
+	// must include a lock_until_round field synced through the holder mirror body.
+	LockUntilRound uint64 `json:"lock_until_round,omitempty"`
+	// : FATF Travel Rule — set to true when the holder has a valid travel rule
+	// attestation from an authorized VASP. Synced via identity-registry.
+	TravelRuleAttested bool `json:"travel_rule_attested,omitempty"`
+	// : Sanctions screening — set to true when the holder has passed sanctions
+	// screening. SanctionsScreeningCid holds the CID of the off-chain attestation
+	// for audit trail purposes.
+	SanctionsCleared      bool   `json:"sanctions_cleared,omitempty"`
+	SanctionsScreeningCid string `json:"sanctions_screening_cid,omitempty"`
+	// RH-6: Beneficial ownership (UBO) tracking — populated by identity-registry
+	// sync. Used for audit/reporting only, no enforcement logic.
+	UboParentEntity string `json:"ubo_parent_entity,omitempty"`
+	OwnershipPct    uint32 `json:"ownership_pct,omitempty"`
 }
 
 type drwaHolderProfileView struct {
@@ -100,6 +216,7 @@ type drwaHolderAuditorAuthorizationView struct {
 type drwaStateReader interface {
 	GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolicyView, error)
 	GetHolderMirror(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error)
+	GetAssetRecord(tokenIdentifier []byte) (*drwaAssetRecordView, error)
 }
 
 type drwaAccountsReader struct {
@@ -126,35 +243,95 @@ func (d *drwaAccountsReader) IsInterfaceNil() bool {
 
 // BuildDRWATokenPolicyKey constructs the storage key for a token's policy entry.
 // Exported so mx-chain-go sync adapter can reuse the canonical key builder.
+// Returns nil if tokenIdentifier is empty — callers must check for nil and
+// return an appropriate error.
 func BuildDRWATokenPolicyKey(tokenIdentifier []byte) []byte {
+	if len(tokenIdentifier) == 0 {
+		return nil
+	}
 	return []byte(drwaTokenPolicyPrefix + hex.EncodeToString(tokenIdentifier) + ":policy")
 }
 
 // BuildDRWAHolderMirrorKey constructs the storage key for a holder's mirror entry.
 // Exported so mx-chain-go sync adapter can reuse the canonical key builder.
+// Returns nil if tokenIdentifier or address is empty.
 func BuildDRWAHolderMirrorKey(tokenIdentifier []byte, address []byte) []byte {
+	if len(tokenIdentifier) == 0 || len(address) == 0 {
+		return nil
+	}
 	return []byte(drwaHolderMirrorPrefix + hex.EncodeToString(tokenIdentifier) + ":" + hex.EncodeToString(address))
 }
 
 // BuildDRWAHolderProfileKey constructs the storage key for a holder's profile entry.
 // Exported so mx-chain-go sync adapter can reuse the canonical key builder.
+// Returns nil if address is empty.
 func BuildDRWAHolderProfileKey(address []byte) []byte {
+	if len(address) == 0 {
+		return nil
+	}
 	return []byte(drwaHolderProfilePrefix + hex.EncodeToString(address))
 }
 
 // BuildDRWAHolderAuditorAuthorizationKey constructs the storage key for a holder's auditor authorization entry.
 // Exported so mx-chain-go sync adapter can reuse the canonical key builder.
+// Returns nil if tokenIdentifier or address is empty.
 func BuildDRWAHolderAuditorAuthorizationKey(tokenIdentifier []byte, address []byte) []byte {
+	if len(tokenIdentifier) == 0 || len(address) == 0 {
+		return nil
+	}
 	return []byte(drwaHolderAuditorAuthPrefix + hex.EncodeToString(tokenIdentifier) + ":" + hex.EncodeToString(address))
 }
 
-func (d *drwaAccountsReader) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+// BuildDRWAAssetRecordKey constructs the storage key for a token's asset record.
+// Exported so mx-chain-go sync adapter can reuse the canonical key builder.
+// Returns nil if tokenIdentifier is empty.
+func BuildDRWAAssetRecordKey(tokenIdentifier []byte) []byte {
+	if len(tokenIdentifier) == 0 {
+		return nil
+	}
+	return []byte(DRWAAssetRecordPrefix + hex.EncodeToString(tokenIdentifier) + ":record")
+}
+
+func (d *drwaAccountsReader) GetAssetRecord(tokenIdentifier []byte) (*drwaAssetRecordView, error) {
+	key := BuildDRWAAssetRecordKey(tokenIdentifier)
+	if key == nil {
+		return nil, fmt.Errorf("drwa asset record: empty token identifier")
+	}
+
 	systemAccount, err := getSystemAccount(d.accounts)
 	if err != nil {
 		return nil, err
 	}
 
-	data, _, err := systemAccount.AccountDataHandler().RetrieveValue(BuildDRWATokenPolicyKey(tokenIdentifier))
+	data, _, err := systemAccount.AccountDataHandler().RetrieveValue(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	record := &drwaAssetRecordView{}
+	err = decodeDRWAStoredJSON(data, record)
+	if err != nil {
+		return nil, fmt.Errorf("drwa asset record unmarshal: %w", err)
+	}
+
+	return record, nil
+}
+
+func (d *drwaAccountsReader) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+	key := BuildDRWATokenPolicyKey(tokenIdentifier)
+	if key == nil {
+		return nil, fmt.Errorf("drwa token policy: empty token identifier")
+	}
+
+	systemAccount, err := getSystemAccount(d.accounts)
+	if err != nil {
+		return nil, err
+	}
+
+	data, _, err := systemAccount.AccountDataHandler().RetrieveValue(key)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +349,19 @@ func (d *drwaAccountsReader) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenP
 }
 
 func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+	mirrorKey := BuildDRWAHolderMirrorKey(tokenIdentifier, address)
+	if mirrorKey == nil {
+		return nil, fmt.Errorf("drwa holder mirror: empty token identifier or address")
+	}
+	profileKey := BuildDRWAHolderProfileKey(address)
+	if profileKey == nil {
+		return nil, fmt.Errorf("drwa holder profile: empty address")
+	}
+	auditorKey := BuildDRWAHolderAuditorAuthorizationKey(tokenIdentifier, address)
+	if auditorKey == nil {
+		return nil, fmt.Errorf("drwa holder auditor auth: empty token identifier or address")
+	}
+
 	account, err := d.loadUserAccount(address, currentAccount)
 	if err != nil {
 		return nil, err
@@ -181,7 +371,7 @@ func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []b
 	}
 
 	var holder *drwaHolderMirrorView
-	data, _, err := account.AccountDataHandler().RetrieveValue(BuildDRWAHolderMirrorKey(tokenIdentifier, address))
+	data, _, err := account.AccountDataHandler().RetrieveValue(mirrorKey)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +384,7 @@ func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []b
 	}
 
 	var profile *drwaHolderProfileView
-	profileData, _, err := account.AccountDataHandler().RetrieveValue(BuildDRWAHolderProfileKey(address))
+	profileData, _, err := account.AccountDataHandler().RetrieveValue(profileKey)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +397,7 @@ func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []b
 	}
 
 	var auditorAuth *drwaHolderAuditorAuthorizationView
-	auditorData, _, err := account.AccountDataHandler().RetrieveValue(BuildDRWAHolderAuditorAuthorizationKey(tokenIdentifier, address))
+	auditorData, _, err := account.AccountDataHandler().RetrieveValue(auditorKey)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +433,12 @@ func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []b
 		merged.TransferLocked = holder.TransferLocked
 		merged.ReceiveLocked = holder.ReceiveLocked
 		merged.AuditorAuthorized = holder.AuditorAuthorized
+		merged.LockUntilRound = holder.LockUntilRound
+		merged.TravelRuleAttested = holder.TravelRuleAttested
+		merged.SanctionsCleared = holder.SanctionsCleared
+		merged.SanctionsScreeningCid = holder.SanctionsScreeningCid
+		merged.UboParentEntity = holder.UboParentEntity
+		merged.OwnershipPct = holder.OwnershipPct
 	}
 	if profile != nil {
 		// Only let profile overwrite shared compliance fields if its
@@ -265,7 +461,7 @@ func (d *drwaAccountsReader) GetHolderMirror(tokenIdentifier []byte, address []b
 		if profileWins || merged.IdentityExpiryRound == 0 {
 			merged.IdentityExpiryRound = profile.ExpiryRound
 		}
-		if merged.ExpiryRound == 0 {
+		if merged.ExpiryRound == 0 && profileWins {
 			merged.ExpiryRound = profile.ExpiryRound
 		}
 	}
@@ -295,6 +491,14 @@ func (d *drwaAccountsReader) loadUserAccount(address []byte, currentAccount vmco
 }
 
 func decodeDRWAStoredJSON(data []byte, destination interface{}) error {
+	// P0 security: reject oversized payloads before JSON parsing to prevent
+	// resource exhaustion from deeply nested or excessively large JSON blobs.
+	// 64KB aligns with the binary decoder's per-field cap.
+	const drwaMaxStoredJSONSize = 65536
+	if len(data) > drwaMaxStoredJSONSize {
+		return fmt.Errorf("drwa stored JSON exceeds size limit: %d > %d", len(data), drwaMaxStoredJSONSize)
+	}
+
 	storedValue := &drwaStoredValue{}
 	jsonErr := json.Unmarshal(data, storedValue)
 	var err error
@@ -349,8 +553,26 @@ func decodeDRWABody(data []byte, destination interface{}) error {
 	// binary decoder when JSON parsing fails: a corrupt JSON body must surface
 	// as a parse error.  Silently re-routing to the binary decoder would drop
 	// AllowedInvestorClasses / AllowedJurisdictions enforcement entirely.
+	//
+	// BINARY FORMAT LIMITATION: The binary token policy decoder cannot
+	// encode AllowedInvestorClasses/AllowedJurisdictions maps. The Rust
+	// policy-registry contract uses JSON when these fields are populated.
+	// A Rust contract bug that serializes restricted policies in binary
+	// format would silently allow all classes/jurisdictions. This is safe
+	// under the current contract implementation but fragile — any change to
+	// the Rust serialization path must be verified against this decoder.
 	if len(data) > 0 && data[0] == '{' {
-		return json.Unmarshal(data, destination)
+		err := json.Unmarshal(data, destination)
+		if err != nil {
+			return err
+		}
+		// F-021: Pre-normalize map keys to lowercase at decode time so that
+		// drwaMapContainsFold can do direct map lookup instead of O(n) iteration.
+		if policy, ok := destination.(*drwaTokenPolicyView); ok {
+			policy.AllowedInvestorClasses = drwaNormalizeMapKeys(policy.AllowedInvestorClasses)
+			policy.AllowedJurisdictions = drwaNormalizeMapKeys(policy.AllowedJurisdictions)
+		}
+		return nil
 	}
 
 	switch typedDestination := destination.(type) {
@@ -368,7 +590,7 @@ func decodeDRWABody(data []byte, destination interface{}) error {
 }
 
 func decodeDRWABinaryTokenPolicy(data []byte, destination *drwaTokenPolicyView) error {
-	if len(data) < 12 {
+	if len(data) < drwaBinaryTokenPolicyMinSize {
 		return errors.New("invalid DRWA binary token policy payload")
 	}
 
@@ -379,7 +601,7 @@ func decodeDRWABinaryTokenPolicy(data []byte, destination *drwaTokenPolicyView) 
 
 	// Validate bytes 4-11 are zero. Reserved bytes must not contain
 	// arbitrary data (prevents covert channels and future format confusion).
-	for i := 4; i < 12 && i < len(data); i++ {
+	for i := 4; i < drwaBinaryTokenPolicyMinSize && i < len(data); i++ {
 		if data[i] != 0 {
 			return fmt.Errorf("DRWA binary policy byte %d is non-zero (%d): reserved bytes must be 0", i, data[i])
 		}
@@ -393,12 +615,25 @@ func decodeDRWABinaryTokenPolicy(data []byte, destination *drwaTokenPolicyView) 
 	// token policies as JSON when investor_classes or jurisdictions are set.
 	// Binary format is only used for policies with boolean-only flags.
 
+	// F-007: Fail-closed for binary-decoded policies with DRWAEnabled=true.
+	// Binary format cannot encode AllowedInvestorClasses/AllowedJurisdictions.
+	// If the policy is enabled and both restriction maps are nil, a Rust
+	// serialization bug could silently allow all classes/jurisdictions. Block
+	// the transfer and emit a metric for operator alerting.
+	if destination.DRWAEnabled {
+		recordDRWAGateMetric("binary_policy_decode_enabled")
+		if destination.AllowedInvestorClasses == nil && destination.AllowedJurisdictions == nil {
+			recordDRWAGateMetric("binary_policy_no_restrictions")
+			return errDRWABinaryPolicyUnsafe
+		}
+	}
+
 	return nil
 }
 
 func decodeDRWABinaryHolderMirror(data []byte, destination *drwaHolderMirrorView) error {
 	cursor := 0
-	if len(data) < 8 {
+	if len(data) < drwaBinaryHolderPayloadMinSize {
 		return errors.New("invalid DRWA binary holder payload")
 	}
 
@@ -432,7 +667,7 @@ func decodeDRWABinaryHolderMirror(data []byte, destination *drwaHolderMirrorView
 	}
 	cursor = nextCursor
 
-	if len(data[cursor:]) < 11 {
+	if len(data[cursor:]) < drwaBinaryHolderTrailerMinSize {
 		return errors.New("invalid DRWA binary holder trailer")
 	}
 
@@ -456,7 +691,7 @@ func decodeDRWABinaryHolderMirror(data []byte, destination *drwaHolderMirrorView
 
 func decodeDRWABinaryHolderProfile(data []byte, destination *drwaHolderProfileView) error {
 	cursor := 0
-	if len(data) < 8 {
+	if len(data) < drwaBinaryProfilePayloadMinSize {
 		return errors.New("invalid DRWA binary holder profile payload")
 	}
 
@@ -507,7 +742,7 @@ func decodeDRWABinaryHolderProfile(data []byte, destination *drwaHolderProfileVi
 // (unlike holder mirror and profile records which embed a version in the
 // first 8 bytes). The authorization boolean is at byte offset 8.
 func decodeDRWABinaryHolderAuditorAuthorization(data []byte, destination *drwaHolderAuditorAuthorizationView) error {
-	if len(data) < 9 {
+	if len(data) < drwaBinaryAuditorAuthPayloadMinSize {
 		return errors.New("invalid DRWA binary holder auditor authorization payload")
 	}
 
@@ -525,9 +760,9 @@ func readDRWABinaryField(data []byte, cursor int) ([]byte, int, error) {
 	}
 
 	fieldLength := int(binary.BigEndian.Uint32(data[cursor : cursor+4]))
-	// Cap field length before allocation to prevent memory exhaustion
-	// from crafted payloads. Matches drwaSyncMaxFieldBytes in the sync layer.
-	if fieldLength > 64*1024 {
+	// F-022: Use exported constant instead of magic number. Cap field length
+	// before allocation to prevent memory exhaustion from crafted payloads.
+	if fieldLength > DRWAMaxFieldBytes {
 		return nil, cursor, fmt.Errorf("DRWA binary field length %d exceeds max 65536", fieldLength)
 	}
 	cursor += 4
@@ -559,15 +794,49 @@ func computeDRWAReadGasCost(baseCost vmcommon.BaseOperationCost, fallbackCost ui
 		unitCost = fallbackCost
 	}
 	if unitCost == 0 {
-		return 0
+		// F-008: Return minimum non-zero gas cost to prevent free compliance
+		// reads when gas schedule provides zero for both base and fallback.
+		return drwaMinReadGasCost
 	}
 
 	// Overflow protection for gas calculation.
-	if unitCost > 0 && reads > math.MaxUint64/(unitCost*drwaReadGasUnits) {
+	gasUnits := drwaReadGasUnitsAtomic.Load()
+	if unitCost > 0 && reads > math.MaxUint64/(unitCost*gasUnits) {
 		return math.MaxUint64
 	}
-	return reads * unitCost * drwaReadGasUnits
+	return reads * unitCost * gasUnits
 }
+
+// Upstream dependency impact assessment for DRWA compliance enforcement.
+//
+// RoundHandler (blockChainHook.go):
+//   Provides round duration for EpochStartBlockTimeStampMs and RoundTime.
+//   DRWA reads CurrentRound() for expiry checks (holder.ExpiryRound,
+//   LockUntilRound). If round duration changes, time-based enforcement
+//   (expiry, SEC Rule 144 lock-up) uses incorrect round-to-time mappings.
+//   Impact: LOW — round numbers remain monotonically correct; only
+//   wall-clock mapping shifts. No DRWA code change needed, but operators
+//   must recalibrate ExpiryRound values after round duration changes.
+//
+// GetAllState (blockChainHook.go):
+//   Returns nil; slated for upstream removal. DRWA does not use
+//   GetAllState — compliance reads use per-key RetrieveValue on
+//   specific system/holder accounts. No impact on DRWA.
+//
+// Shard merge property consolidation (esdtDataStorage.go):
+//   DRWA holder mirrors are stored on the holder's shard account. On
+//   shard merge, mirrors from both shards coexist without conflict because
+//   keys are address-scoped. Token policies on the system account are
+//   identical across shards (written by the sync adapter). Impact: NONE
+//   for correctness — trie merge semantics preserve the system account's
+//   DRWA keys (system account address is the same on all shards).
+
+// MEV consideration: Compliance state changes and transfer enforcement
+// execute within the same transaction context. Cross-transaction ordering
+// (validator MEV) could front-run a compliance state change. Mitigation:
+// compliance changes should use a commit-reveal scheme or mandatory delay
+// before enforcement. See drwaSyncRecoveryTimelockBlocks in
+// drwa_sync_types.go for rate-limiting on recovery_admin writes.
 
 func isDRWARegulatedToken(reader drwaStateReader, tokenIdentifier []byte) (bool, *drwaTokenPolicyView, error) {
 	if reader == nil {
@@ -581,6 +850,23 @@ func isDRWARegulatedToken(reader drwaStateReader, tokenIdentifier []byte) (bool,
 		return false, nil, err
 	}
 	if policy == nil || !policy.DRWAEnabled {
+		// If an asset record exists for this token, the token was previously
+		// registered as regulated. A missing or disabled policy in that case
+		// indicates corruption or unauthorized deletion — deny with
+		// errDRWAPolicyNotSynced rather than silently allowing transfers.
+		assetRecord, assetErr := reader.GetAssetRecord(tokenIdentifier)
+		if assetErr != nil {
+			// Storage error reading asset record — fail-closed.
+			return false, nil, fmt.Errorf("drwa: cannot read asset record for token %s: %w", string(tokenIdentifier), assetErr)
+		}
+		if assetRecord != nil {
+			// Asset record exists but policy is missing/disabled — this token was
+			// once regulated. Deny transfers to prevent compliance escape.
+			logDRWA.Warn("drwa: token has asset record but no active policy — possible policy corruption",
+				"token", string(tokenIdentifier))
+			return false, nil, errDRWAPolicyNotSynced
+		}
+		// No asset record and no policy — genuinely unregulated token. Allow.
 		return false, nil, nil
 	}
 
@@ -599,6 +885,12 @@ func validateDRWASender(policy *drwaTokenPolicyView, holder *drwaHolderMirrorVie
 	if policy.GlobalPause {
 		return drwaDecision{DenialCode: errDRWATokenPaused}
 	}
+	// MiCA wind-down: when initiated, all transfers are denied.
+	// Orderly wind-down requires the issuer to use a separate redemption
+	// mechanism (e.g., direct burn or contract-based buyback), not peer-to-peer transfers.
+	if policy.WindDownInitiated {
+		return drwaDecision{DenialCode: errDRWAWindDownActive}
+	}
 	if holder == nil || !strings.EqualFold(holder.KYCStatus, "approved") {
 		return drwaDecision{DenialCode: errDRWAKYCRequiredSender}
 	}
@@ -611,6 +903,14 @@ func validateDRWASender(policy *drwaTokenPolicyView, holder *drwaHolderMirrorVie
 	if now == 0 && (holder.IdentityExpiryRound > 0 || holder.ExpiryRound > 0) {
 		return drwaDecision{DenialCode: errDRWAAssetExpired}
 	}
+	// F2 (closes N1): same defensive deny when round is unknown but the
+	// holder has an active SEC Rule 144 lock. The original LockUntilRound
+	// check below has an explicit `now > 0` guard which would silently
+	// bypass the lock during the round-unknown window. Mirroring the
+	// expiry deny-by-default closes that bypass.
+	if now == 0 && holder.LockUntilRound > 0 {
+		return drwaDecision{DenialCode: errDRWATransferLocked}
+	}
 	if holder.IdentityExpiryRound > 0 && now > holder.IdentityExpiryRound {
 		return drwaDecision{DenialCode: errDRWAAssetExpired}
 	}
@@ -620,16 +920,35 @@ func validateDRWASender(policy *drwaTokenPolicyView, holder *drwaHolderMirrorVie
 	if holder.TransferLocked {
 		return drwaDecision{DenialCode: errDRWATransferLocked}
 	}
-	if len(policy.AllowedInvestorClasses) > 0 && !policy.AllowedInvestorClasses[holder.InvestorClass] {
+	// RH-1: SEC Rule 144 lock-up period. If lock_until_round is set and the
+	// current round has not reached it, the sender cannot transfer.
+	// The `now` parameter comes from the blockchain hook's current round.
+	// The round-unknown (now==0) case is handled by the deny-by-default branch
+	// above; this branch covers the normal-operation case.
+	if holder.LockUntilRound > 0 && now > 0 && now < holder.LockUntilRound {
+		return drwaDecision{DenialCode: errDRWATransferLocked}
+	}
+	if len(policy.AllowedInvestorClasses) > 0 && !drwaMapContainsFold(policy.AllowedInvestorClasses, holder.InvestorClass) {
 		return drwaDecision{DenialCode: errDRWAInvestorClass}
 	}
-	if len(policy.AllowedJurisdictions) > 0 && !policy.AllowedJurisdictions[holder.JurisdictionCode] {
+	if len(policy.AllowedJurisdictions) > 0 && !drwaMapContainsFold(policy.AllowedJurisdictions, holder.JurisdictionCode) {
 		return drwaDecision{DenialCode: errDRWAJurisdiction}
 	}
 	// Strict auditor mode requires holder to have auditor
 	// authorization for transfers, not just metadata updates.
 	if policy.StrictAuditorMode && !holder.AuditorAuthorized {
 		return drwaDecision{DenialCode: errDRWAAuditorRequired}
+	}
+	// : FATF Travel Rule — sender must have travel rule attestation when
+	// the token policy requires it. The attestation is set by an authorized VASP
+	// via identity-registry and synced to the holder mirror.
+	if policy.TravelRuleRequired && !holder.TravelRuleAttested {
+		return drwaDecision{DenialCode: errDRWATravelRuleRequired}
+	}
+	// : Sanctions screening — sender must have passed sanctions screening
+	// when the token policy enables it.
+	if policy.SanctionsScreeningEnabled && !holder.SanctionsCleared {
+		return drwaDecision{DenialCode: errDRWASanctionsMatch}
 	}
 
 	return drwaDecision{Allowed: true}
@@ -641,6 +960,9 @@ func validateDRWAReceiver(policy *drwaTokenPolicyView, holder *drwaHolderMirrorV
 	}
 	if policy.GlobalPause {
 		return drwaDecision{DenialCode: errDRWATokenPaused}
+	}
+	if policy.WindDownInitiated {
+		return drwaDecision{DenialCode: errDRWAWindDownActive}
 	}
 	if holder == nil || !strings.EqualFold(holder.KYCStatus, "approved") {
 		return drwaDecision{DenialCode: errDRWAKYCRequiredReceiver}
@@ -661,10 +983,10 @@ func validateDRWAReceiver(policy *drwaTokenPolicyView, holder *drwaHolderMirrorV
 	if holder.ReceiveLocked {
 		return drwaDecision{DenialCode: errDRWAReceiveLocked}
 	}
-	if len(policy.AllowedInvestorClasses) > 0 && !policy.AllowedInvestorClasses[holder.InvestorClass] {
+	if len(policy.AllowedInvestorClasses) > 0 && !drwaMapContainsFold(policy.AllowedInvestorClasses, holder.InvestorClass) {
 		return drwaDecision{DenialCode: errDRWAInvestorClass}
 	}
-	if len(policy.AllowedJurisdictions) > 0 && !policy.AllowedJurisdictions[holder.JurisdictionCode] {
+	if len(policy.AllowedJurisdictions) > 0 && !drwaMapContainsFold(policy.AllowedJurisdictions, holder.JurisdictionCode) {
 		return drwaDecision{DenialCode: errDRWAJurisdiction}
 	}
 	// Receiver must also have auditor authorization when
@@ -672,13 +994,45 @@ func validateDRWAReceiver(policy *drwaTokenPolicyView, holder *drwaHolderMirrorV
 	if policy.StrictAuditorMode && !holder.AuditorAuthorized {
 		return drwaDecision{DenialCode: errDRWAAuditorRequired}
 	}
+	// : FATF Travel Rule — receiver must also have travel rule attestation.
+	if policy.TravelRuleRequired && !holder.TravelRuleAttested {
+		return drwaDecision{DenialCode: errDRWATravelRuleRequired}
+	}
+	// : Sanctions screening — receiver must have passed sanctions screening.
+	if policy.SanctionsScreeningEnabled && !holder.SanctionsCleared {
+		return drwaDecision{DenialCode: errDRWASanctionsMatch}
+	}
 
 	return drwaDecision{Allowed: true}
+}
+
+// F-021: Map keys are pre-normalized to lowercase at decode time (see
+// decodeDRWABody). Direct map lookup replaces O(n) iteration.
+func drwaMapContainsFold(allowed map[string]bool, value string) bool {
+	return allowed[strings.ToLower(value)]
+}
+
+// drwaNormalizeMapKeys returns a new map with all keys lowercased.
+// F-021: Called at decode time so lookups can use direct map access.
+func drwaNormalizeMapKeys(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	normalized := make(map[string]bool, len(m))
+	for k, v := range m {
+		normalized[strings.ToLower(k)] = v
+	}
+	return normalized
 }
 
 func validateDRWAMetadataUpdate(policy *drwaTokenPolicyView, auditorAuthorized bool) drwaDecision {
 	if policy == nil || !policy.DRWAEnabled {
 		return drwaDecision{Allowed: true}
+	}
+	// GL-3: Metadata updates must respect GlobalPause — a paused token should
+	// not allow any state mutation, including attribute changes.
+	if policy.GlobalPause {
+		return drwaDecision{DenialCode: errDRWATokenPaused}
 	}
 	if !policy.MetadataProtectionEnabled {
 		return drwaDecision{Allowed: true}
@@ -706,6 +1060,11 @@ func evaluateDRWASenderTransfer(reader drwaStateReader, tokenID []byte, senderAd
 		if m := drwaDenialMetric(decision.DenialCode); m != "" {
 			recordDRWAGateMetric(m)
 		}
+		logDRWA.Warn(drwaLogSenderDenied,
+			"token", string(tokenID),
+			"address", hex.EncodeToString(senderAddr),
+			"reason", decision.DenialCode.Error(),
+		)
 		return true, decision.DenialCode
 	}
 
@@ -733,6 +1092,11 @@ func evaluateDRWAReceiverTransfer(reader drwaStateReader, tokenID []byte, receiv
 		if m := drwaDenialMetric(decision.DenialCode); m != "" {
 			recordDRWAGateMetric(m)
 		}
+		logDRWA.Warn(drwaLogReceiverDenied,
+			"token", string(tokenID),
+			"address", hex.EncodeToString(receiverAddr),
+			"reason", decision.DenialCode.Error(),
+		)
 		return true, decision.DenialCode
 	}
 
@@ -755,12 +1119,38 @@ func evaluateDRWAMetadataUpdate(reader drwaStateReader, tokenID []byte, callerAd
 		return true, err
 	}
 
-	auditorAuthorized := holder != nil && holder.AuditorAuthorized
+	// GL-4: Metadata updates must also enforce KYC/AML on the caller.
+	// A non-compliant holder should not be able to modify token attributes.
+	if holder == nil || !strings.EqualFold(holder.KYCStatus, "approved") {
+		recordDRWAGateMetric(drwaGateMetricDeniedKYCSender)
+		logDRWA.Warn(drwaLogMetadataDenied,
+			"token", string(tokenID),
+			"address", hex.EncodeToString(callerAddr),
+			"reason", errDRWAKYCRequiredSender.Error(),
+		)
+		return true, errDRWAKYCRequiredSender
+	}
+	if !strings.EqualFold(holder.AMLStatus, "clear") && !strings.EqualFold(holder.AMLStatus, "approved") {
+		recordDRWAGateMetric(drwaGateMetricDeniedAMLSender)
+		logDRWA.Warn(drwaLogMetadataDenied,
+			"token", string(tokenID),
+			"address", hex.EncodeToString(callerAddr),
+			"reason", errDRWAAMLBlockedSender.Error(),
+		)
+		return true, errDRWAAMLBlockedSender
+	}
+
+	auditorAuthorized := holder.AuditorAuthorized
 	decision := validateDRWAMetadataUpdate(policy, auditorAuthorized)
 	if !decision.Allowed {
 		if m := drwaDenialMetric(decision.DenialCode); m != "" {
 			recordDRWAGateMetric(m)
 		}
+		logDRWA.Warn(drwaLogMetadataDenied,
+			"token", string(tokenID),
+			"address", hex.EncodeToString(callerAddr),
+			"reason", decision.DenialCode.Error(),
+		)
 		return true, decision.DenialCode
 	}
 

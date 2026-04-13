@@ -7,11 +7,21 @@ import (
 	"math"
 	"testing"
 
-	teststate "github.com/multiversx/mx-chain-go/testscommon/state"
 	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
 	"github.com/multiversx/mx-chain-vm-common-go/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// nonUserAccountStub satisfies vmcommon.AccountHandler but NOT
+// vmcommon.UserAccountHandler. Used to exercise the type-assertion
+// failure path in loadUserAccount without importing mx-chain-go
+// (which would create a circular dependency).
+type nonUserAccountStub struct{}
+
+func (s *nonUserAccountStub) AddressBytes() []byte    { return []byte("stub") }
+func (s *nonUserAccountStub) IncreaseNonce(_ uint64)   { /* no-op stub */ }
+func (s *nonUserAccountStub) GetNonce() uint64         { return 0 }
+func (s *nonUserAccountStub) IsInterfaceNil() bool     { return false }
 
 func TestNewDRWAAccountsReaderRejectsNilAccounts(t *testing.T) {
 	t.Parallel()
@@ -47,7 +57,7 @@ func TestDRWAAccountsReaderLoadUserAccountRejectsWrongType(t *testing.T) {
 
 	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
 		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
-			return &teststate.StateUserAccountHandlerStub{}, nil
+			return &nonUserAccountStub{}, nil
 		},
 	})
 	require.NoError(t, err)
@@ -105,7 +115,7 @@ func TestDecodeDRWABodyBinaryProfileAndAuthorization(t *testing.T) {
 	require.NoError(t, decodeDRWABody(authPayload, auth))
 	require.True(t, auth.AuditorAuthorized)
 
-	// T-5: Non-zero bytes in positions 0-7 must be ignored; only byte 8 determines authorization.
+	// Non-zero bytes in positions 0-7 must be ignored; only byte 8 determines authorization.
 	authPayloadNonZeroPrefix := make([]byte, 9)
 	authPayloadNonZeroPrefix[0] = 0xFF
 	authPayloadNonZeroPrefix[1] = 0xAB
@@ -251,8 +261,9 @@ func TestIsDRWAEnforcementEnabledAndReadGasCost(t *testing.T) {
 	require.True(t, isDRWAEnforcementEnabled(drwaEnabledEpochsHandler()))
 	require.Equal(t, uint64(0), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 7, 0))
 	require.Equal(t, uint64(0), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 0, 3))
-	require.Equal(t, uint64(21), computeDRWAReadGasCost(vmcommon.BaseOperationCost{StorePerByte: 5}, 7, 3))
-	require.Equal(t, uint64(21), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 7, 3))
+	// With drwaReadGasUnits=10: 3 reads * 7 fallbackCost * 10 = 210
+	require.Equal(t, uint64(210), computeDRWAReadGasCost(vmcommon.BaseOperationCost{StorePerByte: 5}, 7, 3))
+	require.Equal(t, uint64(210), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 7, 3))
 }
 
 func TestComputeDRWAReadGasCostOverflow(t *testing.T) {
@@ -262,9 +273,9 @@ func TestComputeDRWAReadGasCostOverflow(t *testing.T) {
 	result := computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, math.MaxUint64, 2)
 	require.Equal(t, uint64(math.MaxUint64), result)
 
-	// Normal case should compute correctly: fallbackCost=100, reads=3, drwaReadGasUnits=1 => 300
+	// Normal case should compute correctly: fallbackCost=100, reads=3, drwaReadGasUnits=10 => 3000
 	result = computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 100, 3)
-	require.Equal(t, uint64(100*3*drwaReadGasUnits), result)
+	require.Equal(t, uint64(100*3*drwaReadGasUnitsAtomic.Load()), result)
 }
 
 func TestReadDRWABinaryFieldRejectsOversizedLength(t *testing.T) {

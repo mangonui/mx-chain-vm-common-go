@@ -21,6 +21,10 @@ func TestDRWAMetricConstants_NonEmpty(t *testing.T) {
 		{"drwaGateMetricDeniedClass", drwaGateMetricDeniedClass},
 		{"drwaGateMetricDeniedJurisdiction", drwaGateMetricDeniedJurisdiction},
 		{"drwaGateMetricDeniedAuditor", drwaGateMetricDeniedAuditor},
+		{"drwaGateMetricDeniedTravelRule", drwaGateMetricDeniedTravelRule},
+		{"drwaGateMetricDeniedSanctions", drwaGateMetricDeniedSanctions},
+		{"drwaGateMetricDeniedWindDown", drwaGateMetricDeniedWindDown},
+		{"drwaGateMetricDeniedPolicyNotSynced", drwaGateMetricDeniedPolicyNotSynced},
 		{"drwaGateMetricDecodeFailure", drwaGateMetricDecodeFailure},
 		{"drwaGateMetricDecodeFailureJSON", drwaGateMetricDecodeFailureJSON},
 		{"drwaGateMetricDecodeFailureBinary", drwaGateMetricDecodeFailureBinary},
@@ -46,6 +50,10 @@ func TestDRWAMetricConstants_NoDuplicates(t *testing.T) {
 		drwaGateMetricDeniedClass,
 		drwaGateMetricDeniedJurisdiction,
 		drwaGateMetricDeniedAuditor,
+		drwaGateMetricDeniedTravelRule,
+		drwaGateMetricDeniedSanctions,
+		drwaGateMetricDeniedWindDown,
+		drwaGateMetricDeniedPolicyNotSynced,
 		drwaGateMetricDecodeFailure,
 		drwaGateMetricDecodeFailureJSON,
 		drwaGateMetricDecodeFailureBinary,
@@ -107,6 +115,10 @@ func TestDrwaDenialMetric_KnownCodes(t *testing.T) {
 		{errDRWAInvestorClass, drwaGateMetricDeniedClass},
 		{errDRWAJurisdiction, drwaGateMetricDeniedJurisdiction},
 		{errDRWAAuditorRequired, drwaGateMetricDeniedAuditor},
+		{errDRWATravelRuleRequired, drwaGateMetricDeniedTravelRule},
+		{errDRWASanctionsMatch, drwaGateMetricDeniedSanctions},
+		{errDRWAWindDownActive, drwaGateMetricDeniedWindDown},
+		{errDRWAPolicyNotSynced, drwaGateMetricDeniedPolicyNotSynced},
 	}
 	for _, tc := range cases {
 		result := drwaDenialMetric(tc.code)
