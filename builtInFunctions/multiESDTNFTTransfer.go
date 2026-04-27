@@ -29,6 +29,11 @@ type esdtNFTMultiTransfer struct {
 
 const argumentsPerTransfer = uint64(3)
 
+type drwaTokenPolicyCacheEntry struct {
+	regulated bool
+	policy    *drwaTokenPolicyView
+}
+
 // NewESDTNFTMultiTransferFunc returns the esdt NFT multi transfer built-in function component
 func NewESDTNFTMultiTransferFunc(
 	funcGasCost uint64,
@@ -172,28 +177,40 @@ func (e *esdtNFTMultiTransfer) ProcessBuiltinFunction(
 		return nil, err
 	}
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// Pre-charge maximum DRWA gas BEFORE any trie reads.
-		// Previous code did isDRWARegulatedToken (trie read) per token before gas check.
-		// 4 reads per token per side: policy + holder mirror + profile + auditor auth.
-		drwaMaxGas := uint64(numOfTransfers) * computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
-		if vmInput.GasProvided < drwaMaxGas {
-			return nil, ErrNotEnoughGas
+		if e.drwaReader == nil {
+			recordDRWAGateMetric(drwaGateMetricReaderMissing)
+			return nil, errDRWAStateReaderMissing
 		}
-		// Now do actual checks and compute actual cost
 		var drwaGasCost uint64
+		cachedPolicies := make(map[string]drwaTokenPolicyCacheEntry, numOfTransfers)
 		for i := uint64(0); i < numOfTransfers; i++ {
 			tokenStartIndex := startIndex + i*argumentsPerTransfer
 			tokenID := vmInput.Arguments[tokenStartIndex]
-			regulated, _, _ := isDRWARegulatedToken(e.drwaReader, tokenID)
+			regulated, policy, errRegulated := isDRWARegulatedToken(e.drwaReader, tokenID, true)
+			if errRegulated != nil {
+				return nil, errRegulated
+			}
+			cachedPolicies[string(tokenID)] = drwaTokenPolicyCacheEntry{
+				regulated: regulated,
+				policy:    policy,
+			}
 			if regulated {
 				drwaGasCost += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
 			}
+		}
+		if vmInput.GasProvided < drwaGasCost {
+			return nil, ErrNotEnoughGas
 		}
 		vmOutput.GasRemaining = vmInput.GasProvided - drwaGasCost
 
 		for i := uint64(0); i < numOfTransfers; i++ {
 			tokenStartIndex := startIndex + i*argumentsPerTransfer
-			err = checkDRWAReceiverTransfer(e.drwaReader, vmInput.Arguments[tokenStartIndex], vmInput.RecipientAddr, acntDst, e.CurrentRound())
+			tokenID := vmInput.Arguments[tokenStartIndex]
+			cached := cachedPolicies[string(tokenID)]
+			if !cached.regulated {
+				continue
+			}
+			_, err = evaluateDRWAReceiverTransferWithPolicy(e.drwaReader, tokenID, cached.policy, vmInput.RecipientAddr, acntDst, e.CurrentRound())
 			if err != nil {
 				return nil, err
 			}
@@ -335,12 +352,13 @@ func (e *esdtNFTMultiTransfer) processESDTNFTMultiTransferOnSenderShard(
 		}
 	}
 	startIndex := uint64(2)
+	cachedPolicies := make(map[string]drwaTokenPolicyCacheEntry, numOfTransfers)
 	for i := uint64(0); i < numOfTransfers; i++ {
 		tokenStartIndex := startIndex + i*argumentsPerTransfer
 		tokenID := vmInput.Arguments[tokenStartIndex]
 
 		if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-			regulated, _, drwaErr := isDRWARegulatedToken(e.drwaReader, tokenID)
+			regulated, policy, drwaErr := isDRWARegulatedToken(e.drwaReader, tokenID, true)
 			if regulated {
 				// Execution path performs evaluateDRWASenderTransfer
 				// (policy + holder mirror + profile + auditor auth = 4 reads) AND
@@ -353,6 +371,10 @@ func (e *esdtNFTMultiTransfer) processESDTNFTMultiTransferOnSenderShard(
 					reads += 4 // receiver: policy + holder mirror + profile + auditor auth
 				}
 				multiTransferCost += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, reads)
+			}
+			cachedPolicies[string(tokenID)] = drwaTokenPolicyCacheEntry{
+				regulated: regulated,
+				policy:    policy,
 			}
 			err = drwaErr
 			if err != nil {
@@ -393,14 +415,17 @@ func (e *esdtNFTMultiTransfer) processESDTNFTMultiTransferOnSenderShard(
 			return nil, fmt.Errorf("%w: max length for a transfer value is %d", ErrInvalidArguments, core.MaxLenForESDTIssueMint)
 		}
 		if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-			_, err = evaluateDRWASenderTransfer(e.drwaReader, tokenID, vmInput.CallerAddr, acntSnd, e.CurrentRound())
-			if err != nil {
-				return nil, err
-			}
-			if !check.IfNil(acntDst) {
-				_, err = evaluateDRWAReceiverTransfer(e.drwaReader, tokenID, dstAddress, acntDst, e.CurrentRound())
+			cached := cachedPolicies[string(tokenID)]
+			if cached.regulated {
+				_, err = evaluateDRWASenderTransferWithPolicy(e.drwaReader, tokenID, cached.policy, vmInput.CallerAddr, acntSnd, e.CurrentRound())
 				if err != nil {
 					return nil, err
+				}
+				if !check.IfNil(acntDst) {
+					_, err = evaluateDRWAReceiverTransferWithPolicy(e.drwaReader, tokenID, cached.policy, dstAddress, acntDst, e.CurrentRound())
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -536,19 +561,6 @@ func (e *esdtNFTMultiTransfer) transferOneTokenOnSenderShard(
 	if esdtData.Value.Cmp(transferData.ESDTValue) < 0 {
 		return nil, computeInsufficientQuantityESDTError(transferData.ESDTTokenName, transferData.ESDTTokenNonce)
 	}
-	esdtData.Value.Sub(esdtData.Value, transferData.ESDTValue)
-
-	properties := vmcommon.NftSaveArgs{
-		MustUpdateAllFields:         false,
-		IsReturnWithError:           isReturnCallWithError,
-		KeepMetaDataOnZeroLiquidity: false,
-	}
-	_, err = e.esdtStorageHandler.SaveESDTNFTToken(acntSnd.AddressBytes(), acntSnd, esdtTokenKey, transferData.ESDTTokenNonce, esdtData, properties)
-	if err != nil {
-		return nil, err
-	}
-
-	esdtData.Value.Set(transferData.ESDTValue)
 
 	tokenID := esdtTokenKey
 	if e.enableEpochsHandler.IsFlagEnabled(CheckCorrectTokenIDForTransferRoleFlag) {
@@ -559,6 +571,23 @@ func (e *esdtNFTMultiTransfer) transferOneTokenOnSenderShard(
 	if err != nil {
 		return nil, err
 	}
+
+	remainingTokenData := &esdt.ESDigitalToken{}
+	*remainingTokenData = *esdtData
+	remainingTokenData.Value = big.NewInt(0).Sub(big.NewInt(0).Set(esdtData.Value), transferData.ESDTValue)
+
+	properties := vmcommon.NftSaveArgs{
+		MustUpdateAllFields:         false,
+		IsReturnWithError:           isReturnCallWithError,
+		KeepMetaDataOnZeroLiquidity: false,
+	}
+	_, err = e.esdtStorageHandler.SaveESDTNFTToken(acntSnd.AddressBytes(), acntSnd, esdtTokenKey, transferData.ESDTTokenNonce, remainingTokenData, properties)
+	if err != nil {
+		return nil, err
+	}
+	esdtData.Type = remainingTokenData.Type
+
+	esdtData.Value = big.NewInt(0).Set(transferData.ESDTValue)
 
 	if !check.IfNil(acntDst) {
 		err = e.addNFTToDestination(

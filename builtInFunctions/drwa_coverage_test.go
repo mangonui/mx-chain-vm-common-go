@@ -167,6 +167,47 @@ func TestGetAssetRecord_RetrieveError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestGetTokenPolicy_NilTrieOnEmptySystemAccountMeansMissingPolicy(t *testing.T) {
+	t.Parallel()
+
+	systemAccount := mock.NewAccountWrapMock(core.SystemAccountAddress)
+	systemAccount.RetrieveValueCalled = func(key []byte) ([]byte, uint32, error) {
+		return nil, 0, errors.New("trie is nil")
+	}
+
+	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return systemAccount, nil
+		},
+	})
+	require.NoError(t, err)
+
+	policy, err := reader.GetTokenPolicy([]byte("SHOW-c9ac27"))
+	require.NoError(t, err)
+	require.Nil(t, policy)
+}
+
+func TestGetTokenPolicy_NilTrieWithRootHashFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	systemAccount := mock.NewAccountWrapMock(core.SystemAccountAddress)
+	systemAccount.SetRootHash([]byte("non-empty-root"))
+	systemAccount.RetrieveValueCalled = func(key []byte) ([]byte, uint32, error) {
+		return nil, 0, errors.New("trie is nil")
+	}
+
+	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return systemAccount, nil
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = reader.GetTokenPolicy([]byte("CARBON-1"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "trie is nil")
+}
+
 func TestGetAssetRecord_EmptyData(t *testing.T) {
 	t.Parallel()
 
@@ -225,6 +266,40 @@ func TestGetAssetRecord_CorruptData(t *testing.T) {
 	require.Contains(t, err.Error(), "drwa asset record unmarshal")
 }
 
+func TestIsDRWAActive_EmptyTokenIdentifier(t *testing.T) {
+	t.Parallel()
+
+	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return mock.NewUserAccount(address), nil
+		},
+	})
+	require.NoError(t, err)
+
+	active, err := reader.IsDRWAActive(nil)
+	require.False(t, active)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty token identifier")
+}
+
+func TestIsDRWAActive_ValidMarker(t *testing.T) {
+	t.Parallel()
+
+	systemAccount := mock.NewAccountWrapMock(core.SystemAccountAddress)
+	require.NoError(t, systemAccount.SaveKeyValue(BuildDRWAActiveKey([]byte("CARBON-1")), []byte{1}))
+
+	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return systemAccount, nil
+		},
+	})
+	require.NoError(t, err)
+
+	active, err := reader.IsDRWAActive([]byte("CARBON-1"))
+	require.NoError(t, err)
+	require.True(t, active)
+}
+
 // ---------------------------------------------------------------------------
 // G-01: Coverage for isDRWARegulatedToken — asset record exists but policy missing
 // ---------------------------------------------------------------------------
@@ -241,7 +316,7 @@ func TestIsDRWARegulatedToken_AssetRecordExistsButNoPolicyDenies(t *testing.T) {
 		},
 	}
 
-	regulated, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"))
+	regulated, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"), true)
 	require.False(t, regulated)
 	require.ErrorIs(t, err, errDRWAPolicyNotSynced)
 }
@@ -258,7 +333,7 @@ func TestIsDRWARegulatedToken_AssetRecordReadError(t *testing.T) {
 		},
 	}
 
-	_, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"))
+	_, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"), true)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot read asset record")
 }
@@ -275,9 +350,26 @@ func TestIsDRWARegulatedToken_DisabledPolicyWithAssetRecord(t *testing.T) {
 		},
 	}
 
-	regulated, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"))
+	regulated, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"), true)
 	require.False(t, regulated)
 	require.ErrorIs(t, err, errDRWAPolicyNotSynced)
+}
+
+func TestIsDRWARegulatedToken_ActiveWithoutPolicyFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return nil, nil
+		},
+		isDRWAActive: func(tokenIdentifier []byte) (bool, error) {
+			return true, nil
+		},
+	}
+
+	regulated, _, err := isDRWARegulatedToken(reader, []byte("CARBON-1"), true)
+	require.True(t, regulated)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +454,7 @@ func TestClassifyDRWADecodeFailureMetric_DefaultCase(t *testing.T) {
 	t.Parallel()
 
 	// Unknown destination type → default metric
-	result := classifyDRWADecodeFailureMetric([]byte{0x01}, &struct{}{})
+	result := classifyDRWADecodeFailureMetric([]byte{0x01}, &struct{}{}, errors.New("decode failure"))
 	require.Equal(t, drwaGateMetricDecodeFailure, result)
 }
 
@@ -389,11 +481,11 @@ func TestDecodeDRWABinaryHolderMirror_InvalidBoolTrailer(t *testing.T) {
 	t.Parallel()
 
 	payload := make([]byte, 0, 64)
-	payload = append(payload, make([]byte, 8)...)                    // version
-	payload = appendLenPrefixed(payload, []byte("approved"))         // kyc
-	payload = appendLenPrefixed(payload, []byte("approved"))         // aml
-	payload = appendLenPrefixed(payload, []byte("QIB"))              // investor class
-	payload = appendLenPrefixed(payload, []byte("US"))               // jurisdiction
+	payload = append(payload, make([]byte, 8)...)            // version
+	payload = appendLenPrefixed(payload, []byte("approved")) // kyc
+	payload = appendLenPrefixed(payload, []byte("approved")) // aml
+	payload = appendLenPrefixed(payload, []byte("QIB"))      // investor class
+	payload = appendLenPrefixed(payload, []byte("US"))       // jurisdiction
 
 	expiry := make([]byte, 8)
 	binary.BigEndian.PutUint64(expiry, 100)
@@ -462,6 +554,26 @@ func TestGetHolderMirror_EmptyInputs(t *testing.T) {
 	require.Contains(t, err.Error(), "empty token identifier or address")
 }
 
+func TestGetHolderMirror_NilTrieOnEmptyHolderAccountMeansMissingMirror(t *testing.T) {
+	t.Parallel()
+
+	holderAccount := mock.NewAccountWrapMock([]byte("holder"))
+	holderAccount.RetrieveValueCalled = func(key []byte) ([]byte, uint32, error) {
+		return nil, 0, errors.New("trie is nil")
+	}
+
+	reader, err := newDRWAAccountsReader(&mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return holderAccount, nil
+		},
+	})
+	require.NoError(t, err)
+
+	holder, err := reader.GetHolderMirror([]byte("CARBON-1"), holderAccount.AddressBytes(), holderAccount)
+	require.NoError(t, err)
+	require.Nil(t, holder)
+}
+
 // ---------------------------------------------------------------------------
 // G-01: Coverage for profile-only merge (no holder mirror, only profile)
 // ---------------------------------------------------------------------------
@@ -495,6 +607,42 @@ func TestGetHolderMirror_ProfileOnlyMerge(t *testing.T) {
 	require.Equal(t, "QIB", merged.InvestorClass)
 	require.Equal(t, "US", merged.JurisdictionCode)
 	require.Equal(t, uint64(99), merged.ExpiryRound)
+}
+
+func TestGetHolderMirror_AuditorAuthorizationOverridesHolderMirrorRegardlessOfVersion(t *testing.T) {
+	t.Parallel()
+
+	holderAccount := mock.NewAccountWrapMock([]byte("holder"))
+	accounts := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return holderAccount, nil
+		},
+	}
+
+	reader, err := newDRWAAccountsReader(accounts)
+	require.NoError(t, err)
+
+	mustSaveDRWAHolderBinary(
+		t,
+		holderAccount,
+		"CARBON-1",
+		"holder",
+		5,
+		"approved",
+		"approved",
+		"QIB",
+		"US",
+		99,
+		false,
+		false,
+		false,
+	)
+	mustSaveDRWAHolderAuditorAuthorizationVersioned(t, holderAccount, "CARBON-1", "holder", true, 3)
+
+	merged, err := reader.GetHolderMirror([]byte("CARBON-1"), []byte("holder"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, merged)
+	require.True(t, merged.AuditorAuthorized)
 }
 
 // ---------------------------------------------------------------------------
@@ -579,11 +727,11 @@ func TestDecodeDRWABodyBinaryHolderMirror(t *testing.T) {
 	t.Parallel()
 
 	payload := make([]byte, 0, 64)
-	payload = append(payload, make([]byte, 8)...)                    // version
-	payload = appendLenPrefixed(payload, []byte("approved"))         // kyc
-	payload = appendLenPrefixed(payload, []byte("clear"))            // aml
-	payload = appendLenPrefixed(payload, []byte("QIB"))              // investor class
-	payload = appendLenPrefixed(payload, []byte("US"))               // jurisdiction
+	payload = append(payload, make([]byte, 8)...)            // version
+	payload = appendLenPrefixed(payload, []byte("approved")) // kyc
+	payload = appendLenPrefixed(payload, []byte("clear"))    // aml
+	payload = appendLenPrefixed(payload, []byte("QIB"))      // investor class
+	payload = appendLenPrefixed(payload, []byte("US"))       // jurisdiction
 
 	expiry := make([]byte, 8)
 	binary.BigEndian.PutUint64(expiry, 200)
@@ -602,6 +750,29 @@ func TestDecodeDRWABodyBinaryHolderMirror(t *testing.T) {
 	require.True(t, holder.AuditorAuthorized)
 }
 
+func TestDecodeDRWABodyBinaryHolderMirrorPolicyVersionEvaluated(t *testing.T) {
+	t.Parallel()
+
+	payload := make([]byte, 0, 72)
+	payload = append(payload, make([]byte, 8)...)            // holder mirror version
+	payload = appendLenPrefixed(payload, []byte("approved")) // kyc
+	payload = appendLenPrefixed(payload, []byte("clear"))    // aml
+	payload = appendLenPrefixed(payload, []byte("QIB"))      // investor class
+	payload = appendLenPrefixed(payload, []byte("US"))       // jurisdiction
+
+	expiry := make([]byte, 8)
+	binary.BigEndian.PutUint64(expiry, 200)
+	payload = append(payload, expiry...)
+	payload = append(payload, 0, 0, 1) // TransferLocked=false, ReceiveLocked=false, AuditorAuthorized=true
+	evaluatedVersion := make([]byte, 8)
+	binary.BigEndian.PutUint64(evaluatedVersion, 4)
+	payload = append(payload, evaluatedVersion...)
+
+	holder := &drwaHolderMirrorView{}
+	require.NoError(t, decodeDRWABody(payload, holder))
+	require.Equal(t, uint64(4), holder.PolicyVersionEvaluated)
+}
+
 // ---------------------------------------------------------------------------
 // G-01: Coverage for decodeDRWABinaryHolderProfile — full valid binary path
 // ---------------------------------------------------------------------------
@@ -610,11 +781,11 @@ func TestDecodeDRWABinaryHolderProfileFullValid(t *testing.T) {
 	t.Parallel()
 
 	payload := make([]byte, 0, 64)
-	payload = append(payload, make([]byte, 8)...)                    // version
-	payload = appendLenPrefixed(payload, []byte("approved"))         // kyc
-	payload = appendLenPrefixed(payload, []byte("clear"))            // aml
-	payload = appendLenPrefixed(payload, []byte("accredited"))       // investor class
-	payload = appendLenPrefixed(payload, []byte("GB"))               // jurisdiction
+	payload = append(payload, make([]byte, 8)...)              // version
+	payload = appendLenPrefixed(payload, []byte("approved"))   // kyc
+	payload = appendLenPrefixed(payload, []byte("clear"))      // aml
+	payload = appendLenPrefixed(payload, []byte("accredited")) // investor class
+	payload = appendLenPrefixed(payload, []byte("GB"))         // jurisdiction
 
 	expiry := make([]byte, 8)
 	binary.BigEndian.PutUint64(expiry, 500)
@@ -659,8 +830,8 @@ func TestDecodeDRWABinaryHolderProfileFieldErrors(t *testing.T) {
 
 	// Valid version prefix but truncated after first field
 	payload := make([]byte, 0, 32)
-	payload = append(payload, make([]byte, 8)...)                    // version
-	payload = appendLenPrefixed(payload, []byte("approved"))         // kyc
+	payload = append(payload, make([]byte, 8)...)            // version
+	payload = appendLenPrefixed(payload, []byte("approved")) // kyc
 	// Missing aml field
 	err := decodeDRWABinaryHolderProfile(payload, &drwaHolderProfileView{})
 	require.Error(t, err)

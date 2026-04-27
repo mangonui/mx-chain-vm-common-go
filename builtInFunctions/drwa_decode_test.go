@@ -3,7 +3,6 @@ package builtInFunctions
 import (
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"math"
 	"testing"
 
@@ -260,7 +259,7 @@ func TestIsDRWAEnforcementEnabledAndReadGasCost(t *testing.T) {
 	require.False(t, isDRWAEnforcementEnabled(nil))
 	require.True(t, isDRWAEnforcementEnabled(drwaEnabledEpochsHandler()))
 	require.Equal(t, uint64(0), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 7, 0))
-	require.Equal(t, uint64(0), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 0, 3))
+	require.Equal(t, uint64(drwaMinReadGasCost), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 0, 3))
 	// With drwaReadGasUnits=10: 3 reads * 7 fallbackCost * 10 = 210
 	require.Equal(t, uint64(210), computeDRWAReadGasCost(vmcommon.BaseOperationCost{StorePerByte: 5}, 7, 3))
 	require.Equal(t, uint64(210), computeDRWAReadGasCost(vmcommon.BaseOperationCost{}, 7, 3))
@@ -287,8 +286,21 @@ func TestReadDRWABinaryFieldRejectsOversizedLength(t *testing.T) {
 	binary.BigEndian.PutUint32(payload, oversizedLength)
 
 	_, _, err := readDRWABinaryField(payload, 0)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), fmt.Sprintf("DRWA binary field length %d exceeds max 65536", oversizedLength))
+	require.ErrorIs(t, err, errDRWABinaryFieldOverflow)
+}
+
+func TestDecodeDRWAStoredJSON_AuditorAuthSetsStoredVersion(t *testing.T) {
+	t.Parallel()
+
+	body := make([]byte, 9)
+	body[8] = 1 // auditor authorized
+	wrapped, _ := json.Marshal(&drwaStoredValue{Version: 7, Body: body})
+
+	view := &drwaHolderAuditorAuthorizationView{}
+	err := decodeDRWAStoredJSON(wrapped, view)
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), view.storedVersion)
+	require.True(t, view.AuditorAuthorized)
 }
 
 func appendLenPrefixed(buffer []byte, value []byte) []byte {

@@ -200,7 +200,7 @@ func TestCreateBuiltInContainer_Create(t *testing.T) {
 
 	err = f.SetBlockchainHook(&disabledBlockchainHook{})
 	assert.Nil(t, err)
-	assert.Equal(t, 10, numSetBlockDataHandlerCalls)
+	assert.Equal(t, 17, numSetBlockDataHandlerCalls)
 
 	fillGasMapInternal(args.GasMap, 5)
 	f.GasScheduleChange(args.GasMap)

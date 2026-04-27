@@ -223,6 +223,65 @@ func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSender(t *testing.T) {
 	require.ErrorIs(t, err, errDRWAKYCRequiredSender)
 }
 
+func TestESDTTransfer_ProcessBuiltinFunction_DRWAZeroAmountRejectedWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	accounts, state := createDRWATestAccounts()
+	transferFunc, _ := NewESDTTransferFunc(
+		10,
+		&mock.MarshalizerMock{},
+		&mock.GlobalSettingsHandlerStub{},
+		&mock.ShardCoordinatorStub{},
+		&mock.ESDTRoleHandlerStub{},
+		drwaEnabledEpochsHandler(),
+	)
+	require.NoError(t, transferFunc.SetPayableChecker(&mock.PayableHandlerStub{}))
+	transferFunc.SetDRWAReader(mustCreateDRWAReader(t, accounts))
+
+	systemAcc := state[string(vmcommon.SystemAccountAddress)]
+	mustSaveDRWATokenPolicy(t, systemAcc, "CARBON-123", &drwaTokenPolicyView{
+		DRWAEnabled: true,
+	})
+
+	sender := state["sender"]
+	receiver := state["receiver"]
+	mustSaveESDTBalance(t, sender, "CARBON-123", 10)
+	mustSaveDRWAHolder(t, sender, "CARBON-123", "sender", &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	mustSaveDRWAHolder(t, receiver, "CARBON-123", "receiver", &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+
+	vmInput := &vmcommon.ContractCallInput{
+		VMInput: vmcommon.VMInput{
+			CallerAddr: []byte("sender"),
+			Arguments: [][]byte{
+				[]byte("CARBON-123"),
+				{},
+			},
+			CallValue:   big.NewInt(0),
+			GasProvided: 10000,
+			CallType:    vm.DirectCall,
+		},
+		RecipientAddr: []byte("receiver"),
+	}
+
+	preSenderBalance := getESDTBalance(t, transferFunc.marshaller, sender, []byte("CARBON-123"), 0)
+	preReceiverBalance := getESDTBalance(t, transferFunc.marshaller, receiver, []byte("CARBON-123"), 0)
+
+	output, err := transferFunc.ProcessBuiltinFunction(sender, receiver, vmInput)
+	require.ErrorIs(t, err, ErrNegativeValue)
+	require.Nil(t, output)
+
+	postSenderBalance := getESDTBalance(t, transferFunc.marshaller, sender, []byte("CARBON-123"), 0)
+	postReceiverBalance := getESDTBalance(t, transferFunc.marshaller, receiver, []byte("CARBON-123"), 0)
+	require.Equal(t, preSenderBalance, postSenderBalance, "sender balance must remain unchanged on zero-amount rejection")
+	require.Equal(t, preReceiverBalance, postReceiverBalance, "receiver balance must remain unchanged on zero-amount rejection")
+}
+
 func TestESDTTransfer_ProcessBuiltinFunction_DRWADeniesSenderFromBinaryStoredMirror(t *testing.T) {
 	t.Parallel()
 
@@ -495,6 +554,59 @@ func TestESDTNFTTransfer_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing(t *
 	require.ErrorIs(t, err, ErrAccountNotPayable)
 }
 
+func TestESDTNFTTransfer_ProcessBuiltinFunction_SenderShardRequiresDRWAReader(t *testing.T) {
+	t.Parallel()
+
+	globalSettingsHandler := &mock.GlobalSettingsHandlerStub{}
+	enableEpochsHandler := drwaEnabledEpochsHandler(SaveToSystemAccountFlag, CheckCorrectTokenIDForTransferRoleFlag)
+
+	nftTransfer, _ := createNFTTransferAndStorageHandler(0, 2, globalSettingsHandler, enableEpochsHandler)
+	require.NoError(t, nftTransfer.SetPayableChecker(&mock.PayableHandlerStub{
+		IsPayableCalled: func(address []byte) (bool, error) {
+			return true, nil
+		},
+	}))
+
+	systemAcc, err := nftTransfer.accounts.LoadAccount(vmcommon.SystemAccountAddress)
+	require.NoError(t, err)
+	mustSaveDRWATokenPolicy(t, systemAcc.(vmcommon.UserAccountHandler), "HOTEL-1", &drwaTokenPolicyView{
+		DRWAEnabled: true,
+	})
+
+	senderAcc, err := nftTransfer.accounts.LoadAccount([]byte("sender0"))
+	require.NoError(t, err)
+	mustSaveDRWAHolder(t, senderAcc.(vmcommon.UserAccountHandler), "HOTEL-1", "sender0", &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	createESDTNFTToken(
+		[]byte("HOTEL-1"),
+		core.NonFungible,
+		1,
+		big.NewInt(1),
+		nftTransfer.marshaller,
+		senderAcc.(vmcommon.UserAccountHandler),
+	)
+
+	vmInput := &vmcommon.ContractCallInput{
+		VMInput: vmcommon.VMInput{
+			CallerAddr: []byte("sender0"),
+			Arguments: [][]byte{
+				[]byte("HOTEL-1"),
+				big.NewInt(1).Bytes(),
+				big.NewInt(1).Bytes(),
+				[]byte("target0"),
+			},
+			CallValue:   big.NewInt(0),
+			GasProvided: 10000,
+		},
+		RecipientAddr: []byte("sender0"),
+	}
+
+	_, err = nftTransfer.ProcessBuiltinFunction(senderAcc.(vmcommon.UserAccountHandler), nil, vmInput)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
+}
+
 func TestESDTNFTMultiTransfer_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing(t *testing.T) {
 	t.Parallel()
 
@@ -667,14 +779,14 @@ func TestUpdateNFTAttributes_ProcessBuiltinFunction_DRWADeniesWithoutAuditorAuth
 	}
 	esdtDataBytes, err := (&mock.MarshalizerMock{}).Marshal(esdtData)
 	require.NoError(t, err)
-	require.NoError(t, userAcc.AccountDataHandler().SaveKeyValue([]byte(core.ProtectedKeyPrefix+core.ESDTKeyIdentifier+"MRV-NFT"+string([]byte{1})), esdtDataBytes))
+	require.NoError(t, userAcc.AccountDataHandler().SaveKeyValue([]byte(core.ProtectedKeyPrefix+core.ESDTKeyIdentifier+"DRWA-NFT-AUDIT"+string([]byte{1})), esdtDataBytes))
 
-	mustSaveDRWATokenPolicy(t, systemAcc, "MRV-NFT", &drwaTokenPolicyView{
+	mustSaveDRWATokenPolicy(t, systemAcc, "DRWA-NFT-AUDIT", &drwaTokenPolicyView{
 		DRWAEnabled:               true,
 		MetadataProtectionEnabled: true,
 		StrictAuditorMode:         true,
 	})
-	mustSaveDRWAHolder(t, userAcc, "MRV-NFT", "audited", &drwaHolderMirrorView{
+	mustSaveDRWAHolder(t, userAcc, "DRWA-NFT-AUDIT", "audited", &drwaHolderMirrorView{
 		KYCStatus:         "approved",
 		AMLStatus:         "approved",
 		AuditorAuthorized: false,
@@ -685,7 +797,7 @@ func TestUpdateNFTAttributes_ProcessBuiltinFunction_DRWADeniesWithoutAuditorAuth
 			CallerAddr:  []byte("audited"),
 			CallValue:   big.NewInt(0),
 			GasProvided: 1000,
-			Arguments:   [][]byte{[]byte("MRV-NFT"), {1}, []byte("new-attrs")},
+			Arguments:   [][]byte{[]byte("DRWA-NFT-AUDIT"), {1}, []byte("new-attrs")},
 		},
 		RecipientAddr: []byte("audited"),
 	}
@@ -749,6 +861,84 @@ func TestUpdateNFTAttributes_ProcessBuiltinFunction_AllowsWhenTokenPolicyMissing
 	require.NoError(t, err)
 	require.NotNil(t, output)
 	require.Equal(t, vmcommon.Ok, output.ReturnCode)
+}
+
+func TestUpdateNFTAttributes_ProcessBuiltinFunction_FrozenNFTStillBlocksWhenDRWAEnabled(t *testing.T) {
+	t.Parallel()
+
+	globalSettingsHandler := &mock.GlobalSettingsHandlerStub{}
+	enableEpochsHandler := drwaEnabledEpochsHandler(ESDTNFTImprovementV1Flag, SaveToSystemAccountFlag)
+	rolesHandler := &mock.ESDTRoleHandlerStub{}
+
+	userAcc := mock.NewAccountWrapMock([]byte("frozen-holder"))
+	systemAcc := mock.NewUserAccount(vmcommon.SystemAccountAddress)
+	accounts := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(vmcommon.SystemAccountAddress) {
+				return systemAcc, nil
+			}
+			if string(address) == "frozen-holder" {
+				return userAcc, nil
+			}
+			return mock.NewUserAccount(address), nil
+		},
+	}
+
+	esdtDataStorage := createNewESDTDataStorageHandlerWithArgs(globalSettingsHandler, accounts, enableEpochsHandler)
+	updateFunc, _ := NewESDTNFTUpdateAttributesFunc(
+		10,
+		vmcommon.BaseOperationCost{},
+		esdtDataStorage,
+		globalSettingsHandler,
+		rolesHandler,
+		enableEpochsHandler,
+		&mock.MarshalizerMock{},
+	)
+	updateFunc.SetDRWAReader(mustCreateDRWAReader(t, accounts))
+
+	frozenMeta := ESDTUserMetadata{Frozen: true}
+	esdtData := &esdt.ESDigitalToken{
+		TokenMetaData: &esdt.MetaData{Name: []byte("frozen")},
+		Value:         big.NewInt(10),
+		Properties:    frozenMeta.ToBytes(),
+	}
+	esdtDataBytes, err := (&mock.MarshalizerMock{}).Marshal(esdtData)
+	require.NoError(t, err)
+
+	tokenKey := []byte(core.ProtectedKeyPrefix + core.ESDTKeyIdentifier + "DRWA-FROZEN" + string([]byte{1}))
+	require.NoError(t, userAcc.AccountDataHandler().SaveKeyValue(tokenKey, esdtDataBytes))
+
+	mustSaveDRWATokenPolicy(t, systemAcc, "DRWA-FROZEN", &drwaTokenPolicyView{
+		DRWAEnabled:               true,
+		MetadataProtectionEnabled: true,
+		StrictAuditorMode:         true,
+	})
+	mustSaveDRWAHolder(t, userAcc, "DRWA-FROZEN", "frozen-holder", &drwaHolderMirrorView{
+		KYCStatus:         "approved",
+		AMLStatus:         "approved",
+		AuditorAuthorized: true,
+	})
+
+	vmInput := &vmcommon.ContractCallInput{
+		VMInput: vmcommon.VMInput{
+			CallerAddr:  []byte("frozen-holder"),
+			CallValue:   big.NewInt(0),
+			GasProvided: 1000,
+			Arguments:   [][]byte{[]byte("DRWA-FROZEN"), {1}, []byte("new-attrs")},
+		},
+		RecipientAddr: []byte("frozen-holder"),
+	}
+
+	output, err := updateFunc.ProcessBuiltinFunction(userAcc, nil, vmInput)
+	require.Nil(t, output)
+	require.ErrorIs(t, err, ErrESDTIsFrozenForAccount)
+
+	stored, _, err := userAcc.AccountDataHandler().RetrieveValue(tokenKey)
+	require.NoError(t, err)
+
+	storedToken := &esdt.ESDigitalToken{}
+	require.NoError(t, (&mock.MarshalizerMock{}).Unmarshal(storedToken, stored))
+	require.Equal(t, []byte(nil), storedToken.TokenMetaData.Attributes, "frozen NFT must not mutate attributes")
 }
 
 func TestDRWAIdentityProfileFallbackAllowsTransferWithoutTokenMirror(t *testing.T) {
@@ -823,19 +1013,19 @@ func TestDRWAAuditorAuthorizationFallbackAllowsMetadataUpdate(t *testing.T) {
 	}
 
 	reader := mustCreateDRWAReader(t, accounts)
-	mustSaveDRWATokenPolicy(t, systemAcc, "MRV-NFT-FALLBACK", &drwaTokenPolicyView{
+	mustSaveDRWATokenPolicy(t, systemAcc, "DRWA-NFT-FALLBACK", &drwaTokenPolicyView{
 		DRWAEnabled:               true,
 		MetadataProtectionEnabled: true,
 		StrictAuditorMode:         true,
 	})
-	mustSaveDRWAHolderAuditorAuthorization(t, userAcc, "MRV-NFT-FALLBACK", "audited", true)
+	mustSaveDRWAHolderAuditorAuthorization(t, userAcc, "DRWA-NFT-FALLBACK", "audited", true)
 	// GL-4: Metadata updates now enforce KYC/AML — the holder must be compliant.
-	mustSaveDRWAHolder(t, userAcc, "MRV-NFT-FALLBACK", "audited", &drwaHolderMirrorView{
+	mustSaveDRWAHolder(t, userAcc, "DRWA-NFT-FALLBACK", "audited", &drwaHolderMirrorView{
 		KYCStatus: "approved",
 		AMLStatus: "approved",
 	})
 
-	regulated, err := evaluateDRWAMetadataUpdate(reader, []byte("MRV-NFT-FALLBACK"), []byte("audited"), userAcc)
+	regulated, err := evaluateDRWAMetadataUpdate(reader, []byte("DRWA-NFT-FALLBACK"), []byte("audited"), userAcc)
 	require.True(t, regulated)
 	require.NoError(t, err)
 }
@@ -960,6 +1150,17 @@ func mustSaveDRWAHolderAuditorAuthorization(
 	address string,
 	authorized bool,
 ) {
+	mustSaveDRWAHolderAuditorAuthorizationVersioned(t, account, tokenID, address, authorized, 1)
+}
+
+func mustSaveDRWAHolderAuditorAuthorizationVersioned(
+	t *testing.T,
+	account vmcommon.UserAccountHandler,
+	tokenID string,
+	address string,
+	authorized bool,
+	version uint64,
+) {
 	t.Helper()
 
 	body, err := json.Marshal(&drwaHolderAuditorAuthorizationView{
@@ -967,7 +1168,7 @@ func mustSaveDRWAHolderAuditorAuthorization(
 	})
 	require.NoError(t, err)
 	data, err := json.Marshal(&drwaStoredValue{
-		Version: 1,
+		Version: version,
 		Body:    body,
 	})
 	require.NoError(t, err)
@@ -1464,6 +1665,89 @@ func TestESDTNFTMultiTransfer_ProcessBuiltinFunction_DRWADeniesEntireBatchOnOneB
 	destTokenBBalance := getESDTBalance(t, multiTransfer.marshaller, destinationAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenB), 0)
 	require.Equal(t, big.NewInt(0), destTokenABalance, "destination must NOT have received token A (atomic rollback)")
 	require.Equal(t, big.NewInt(0), destTokenBBalance, "destination must NOT have received token B (denied directly)")
+}
+
+func TestESDTNFTMultiTransfer_ProcessBuiltinFunction_DRWACrossShardDestinationDeniesEntireBatchOnOneBadToken(t *testing.T) {
+	t.Parallel()
+
+	const (
+		regulatedTokenA = "GOOD-XSHARD"
+		regulatedTokenB = "BAD-XSHARD"
+	)
+
+	multiTransfer := createESDTNFTMultiTransferWithMockArguments(0, 1, &mock.GlobalSettingsHandlerStub{})
+	multiTransfer.enableEpochsHandler = drwaEnabledEpochsHandler(ESDTNFTImprovementV1Flag, CheckCorrectTokenIDForTransferRoleFlag)
+	multiTransfer.SetDRWAReader(mustCreateDRWAReader(t, multiTransfer.accounts))
+
+	payableChecker, err := NewPayableCheckFunc(
+		&mock.PayableHandlerStub{
+			IsPayableCalled: func(address []byte) (bool, error) {
+				return true, nil
+			},
+		},
+		&mock.EnableEpochsHandlerStub{
+			IsFlagEnabledCalled: func(flag core.EnableEpochFlag) bool {
+				return flag == FixAsyncCallbackCheckFlag || flag == CheckFunctionArgumentFlag
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, multiTransfer.SetPayableChecker(payableChecker))
+
+	destinationAddress := bytes.Repeat([]byte{0}, 32)
+	destinationAddress[25] = 1
+
+	systemAcc, err := multiTransfer.accounts.LoadAccount(vmcommon.SystemAccountAddress)
+	require.NoError(t, err)
+	mustSaveDRWATokenPolicy(t, systemAcc.(vmcommon.UserAccountHandler), regulatedTokenA, &drwaTokenPolicyView{DRWAEnabled: true})
+	mustSaveDRWATokenPolicy(t, systemAcc.(vmcommon.UserAccountHandler), regulatedTokenB, &drwaTokenPolicyView{DRWAEnabled: true})
+	require.NoError(t, multiTransfer.accounts.SaveAccount(systemAcc))
+
+	destinationAccount, err := multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+	mustSaveDRWAHolder(t, destinationAccount.(vmcommon.UserAccountHandler), regulatedTokenA, string(destinationAddress), &drwaHolderMirrorView{
+		KYCStatus: "approved",
+		AMLStatus: "approved",
+	})
+	mustSaveDRWAHolder(t, destinationAccount.(vmcommon.UserAccountHandler), regulatedTokenB, string(destinationAddress), &drwaHolderMirrorView{
+		KYCStatus: "pending",
+		AMLStatus: "approved",
+	})
+	require.NoError(t, multiTransfer.accounts.SaveAccount(destinationAccount))
+	_, _ = multiTransfer.accounts.Commit()
+
+	destinationAccount, err = multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+
+	vmInput := &vmcommon.ContractCallInput{
+		VMInput: vmcommon.VMInput{
+			CallerAddr:  bytes.Repeat([]byte{2}, 32),
+			CallValue:   big.NewInt(0),
+			GasProvided: 200000,
+			Arguments: [][]byte{
+				big.NewInt(2).Bytes(),
+				[]byte(regulatedTokenA),
+				big.NewInt(0).Bytes(),
+				big.NewInt(1).Bytes(),
+				[]byte(regulatedTokenB),
+				big.NewInt(0).Bytes(),
+				big.NewInt(1).Bytes(),
+			},
+		},
+		RecipientAddr: destinationAddress,
+	}
+
+	output, err := multiTransfer.ProcessBuiltinFunction(nil, destinationAccount.(vmcommon.UserAccountHandler), vmInput)
+	require.Error(t, err, "cross-shard destination processing must deny when one regulated leg fails")
+	require.ErrorIs(t, err, errDRWAKYCRequiredReceiver)
+	require.Nil(t, output)
+
+	destinationAccountAfter, err := multiTransfer.accounts.LoadAccount(destinationAddress)
+	require.NoError(t, err)
+	destTokenABalance := getESDTBalance(t, multiTransfer.marshaller, destinationAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenA), 0)
+	destTokenBBalance := getESDTBalance(t, multiTransfer.marshaller, destinationAccountAfter.(vmcommon.UserAccountHandler), []byte(regulatedTokenB), 0)
+	require.Equal(t, big.NewInt(0), destTokenABalance, "destination must NOT have received token A after destination-side atomic rollback")
+	require.Equal(t, big.NewInt(0), destTokenBBalance, "destination must NOT have received token B after destination-side denial")
 }
 
 // getESDTBalance is a small helper that reads the ESDT balance for a given

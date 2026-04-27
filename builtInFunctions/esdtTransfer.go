@@ -132,35 +132,26 @@ func (e *esdtTransfer) ProcessBuiltinFunction(
 	if err != nil {
 		return nil, err
 	}
+	// Both accounts nil means no shard can validate — reject for safety
+	if check.IfNil(acntSnd) && check.IfNil(acntDst) {
+		return nil, fmt.Errorf("DRWA enforcement: both sender and receiver accounts nil — cross-shard validation gap")
+	}
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// Pre-charge maximum DRWA gas before performing state reads.
-		// Prevents free trie reads as a DoS vector for regulated tokens.
-		// Max cost: 8 reads (4 per side: policy + holder mirror + profile + auditor auth).
-		// In-shard regulated transfer checks both sender and receiver.
-		// Cross-shard transfers check only one side (4 reads); unused pre-charged gas is returned.
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 8)
-		if !skipGasUse && vmInput.GasProvided < gasToUse+drwaMaxGas {
-			return nil, ErrNotEnoughGas
+		if e.drwaReader == nil {
+			recordDRWAGateMetric(drwaGateMetricReaderMissing)
+			return nil, errDRWAStateReaderMissing
 		}
-
 		// When account is nil (cross-shard), we still validate our side.
 		// Source shard: acntSnd is present (validate sender), acntDst is nil (skip receiver — destination shard validates).
 		// Destination shard: acntDst is present (validate receiver), acntSnd is nil (skip sender — source shard validated).
 		// This is the correct cross-shard split per spec §11_DRWA_Cross_Shard_Enforcement.
-		// The critical invariant: if BOTH are nil, deny the transfer (should never happen in valid protocol).
-		if check.IfNil(acntSnd) && check.IfNil(acntDst) {
-			// Both accounts nil means no shard can validate — reject for safety
-			if e.drwaReader != nil {
-				isRegulated, _, _ := isDRWARegulatedToken(e.drwaReader, tokenID)
-				if isRegulated {
-					return nil, fmt.Errorf("DRWA enforcement: both sender and receiver accounts nil for regulated token %s — cross-shard validation gap", string(tokenID))
-				}
-			}
-		}
 		if !check.IfNil(acntSnd) {
 			regulated, drwaErr := evaluateDRWASenderTransfer(e.drwaReader, tokenID, vmInput.CallerAddr, acntSnd, e.CurrentRound())
 			if regulated {
 				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
+				if !skipGasUse && vmInput.GasProvided < gasToUse {
+					return nil, ErrNotEnoughGas
+				}
 			}
 			err = drwaErr
 			if err != nil {
@@ -171,6 +162,9 @@ func (e *esdtTransfer) ProcessBuiltinFunction(
 			regulated, drwaErr := evaluateDRWAReceiverTransfer(e.drwaReader, tokenID, vmInput.RecipientAddr, acntDst, e.CurrentRound())
 			if regulated {
 				gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
+				if !skipGasUse && vmInput.GasProvided < gasToUse {
+					return nil, ErrNotEnoughGas
+				}
 			}
 			err = drwaErr
 			if err != nil {

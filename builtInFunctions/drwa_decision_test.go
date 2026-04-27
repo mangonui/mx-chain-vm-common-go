@@ -1,6 +1,11 @@
 package builtInFunctions
 
-import "testing"
+import (
+	"math"
+	"testing"
+
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+)
 
 func TestValidateDRWAReceiverBranches(t *testing.T) {
 	t.Parallel()
@@ -62,8 +67,8 @@ func TestValidateDRWAReceiverBranches(t *testing.T) {
 
 	allowed := validateDRWAReceiver(&drwaTokenPolicyView{
 		DRWAEnabled:            true,
-		AllowedInvestorClasses: map[string]bool{"QIB": true},
-		AllowedJurisdictions:   map[string]bool{"US": true},
+		AllowedInvestorClasses: map[string]bool{"qib": true},
+		AllowedJurisdictions:   map[string]bool{"us": true},
 	}, &drwaHolderMirrorView{
 		KYCStatus:        "approved",
 		AMLStatus:        "approved",
@@ -72,6 +77,32 @@ func TestValidateDRWAReceiverBranches(t *testing.T) {
 	}, 0)
 	if !allowed.Allowed {
 		t.Fatalf("expected allowed receiver, got %v", allowed.DenialCode)
+	}
+}
+
+func TestValidateDRWAHolderPolicyFreshnessDeniesStaleMirrors(t *testing.T) {
+	t.Parallel()
+
+	policy := &drwaTokenPolicyView{DRWAEnabled: true, TokenPolicyVersion: 3}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:              "approved",
+		AMLStatus:              "approved",
+		PolicyVersionEvaluated: 2,
+	}
+
+	if decision := validateDRWASender(policy, holder, 100); decision.DenialCode != errDRWAPolicyNotSynced {
+		t.Fatalf("expected sender policy-stale denial, got %v", decision.DenialCode)
+	}
+	if decision := validateDRWAReceiver(policy, holder, 100); decision.DenialCode != errDRWAPolicyNotSynced {
+		t.Fatalf("expected receiver policy-stale denial, got %v", decision.DenialCode)
+	}
+
+	holder.PolicyVersionEvaluated = 3
+	if decision := validateDRWASender(policy, holder, 100); !decision.Allowed {
+		t.Fatalf("expected fresh sender holder mirror to pass, got %v", decision.DenialCode)
+	}
+	if decision := validateDRWAReceiver(policy, holder, 100); !decision.Allowed {
+		t.Fatalf("expected fresh receiver holder mirror to pass, got %v", decision.DenialCode)
 	}
 }
 
@@ -249,6 +280,101 @@ func TestValidateDRWAMetadataUpdateBranches(t *testing.T) {
 	}
 }
 
+type stubDRWAStateReader struct {
+	policy      *drwaTokenPolicyView
+	holder      *drwaHolderMirrorView
+	assetRecord *drwaAssetRecordView
+	active      bool
+}
+
+func (s *stubDRWAStateReader) GetTokenPolicy(_ []byte) (*drwaTokenPolicyView, error) {
+	return s.policy, nil
+}
+
+func (s *stubDRWAStateReader) GetHolderMirror(_ []byte, _ []byte, _ vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+	return s.holder, nil
+}
+
+func (s *stubDRWAStateReader) GetHolderProfile(_ []byte) (*drwaHolderProfileView, error) {
+	return nil, nil
+}
+
+func (s *stubDRWAStateReader) GetHolderAuditorAuthorization(_ []byte, _ []byte) (*drwaHolderAuditorAuthorizationView, error) {
+	return nil, nil
+}
+
+func (s *stubDRWAStateReader) GetAssetRecord(_ []byte) (*drwaAssetRecordView, error) {
+	return s.assetRecord, nil
+}
+
+func (s *stubDRWAStateReader) IsDRWAActive(_ []byte) (bool, error) {
+	return s.active, nil
+}
+
+func TestEvaluateDRWASenderTransferWithPolicyDeniesAssetRecordWindDown(t *testing.T) {
+	t.Parallel()
+
+	reader := &stubDRWAStateReader{
+		policy: &drwaTokenPolicyView{DRWAEnabled: true},
+		holder: &drwaHolderMirrorView{KYCStatus: "approved", AMLStatus: "approved"},
+		assetRecord: &drwaAssetRecordView{
+			WindDownInitiated: true,
+		},
+	}
+
+	regulated, err := evaluateDRWASenderTransferWithPolicy(reader, []byte("HOTEL-1234"), reader.policy, []byte("sender"), nil, 100)
+	if !regulated {
+		t.Fatalf("expected regulated token")
+	}
+	if err != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial, got %v", err)
+	}
+}
+
+func TestEvaluateDRWAReceiverTransferWithPolicyDeniesAssetRecordWindDown(t *testing.T) {
+	t.Parallel()
+
+	reader := &stubDRWAStateReader{
+		policy: &drwaTokenPolicyView{DRWAEnabled: true},
+		holder: &drwaHolderMirrorView{KYCStatus: "approved", AMLStatus: "approved"},
+		assetRecord: &drwaAssetRecordView{
+			WindDownInitiated: true,
+		},
+	}
+
+	regulated, err := evaluateDRWAReceiverTransferWithPolicy(reader, []byte("HOTEL-1234"), reader.policy, []byte("receiver"), nil, 100)
+	if !regulated {
+		t.Fatalf("expected regulated token")
+	}
+	if err != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial, got %v", err)
+	}
+}
+
+func TestEvaluateDRWAMetadataUpdateDeniesAssetRecordWindDown(t *testing.T) {
+	t.Parallel()
+
+	reader := &stubDRWAStateReader{
+		policy: &drwaTokenPolicyView{DRWAEnabled: true},
+		holder: &drwaHolderMirrorView{
+			KYCStatus:         "approved",
+			AMLStatus:         "approved",
+			AuditorAuthorized: true,
+		},
+		assetRecord: &drwaAssetRecordView{
+			WindDownInitiated: true,
+		},
+	}
+
+	regulated, err := evaluateDRWAMetadataUpdate(reader, []byte("HOTEL-1234"), []byte("caller"), nil)
+	if !regulated {
+		t.Fatalf("expected regulated token")
+	}
+	if err != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial, got %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // F2 (closes N1): LockUntilRound deny-by-default when round is unknown
 // ---------------------------------------------------------------------------
@@ -305,5 +431,48 @@ func TestValidateDRWASenderLockUntilRoundStillEnforcedDuringNormalOperation(t *t
 	d := validateDRWASender(policy, holder, 500)
 	if d.DenialCode != errDRWATransferLocked {
 		t.Fatalf("expected transfer locked at round=500 < lock=1000, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderDeniedLockUntilRoundNearUint64Boundary(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: math.MaxUint64,
+	}
+
+	d := validateDRWASender(policy, holder, math.MaxUint64-1)
+	if d.DenialCode != errDRWATransferLocked {
+		t.Fatalf("expected transfer locked near uint64 boundary, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWASenderAllowedLockUntilRoundAtUint64Boundary(t *testing.T) {
+	t.Parallel()
+	policy := &drwaTokenPolicyView{DRWAEnabled: true}
+	holder := &drwaHolderMirrorView{
+		KYCStatus:      "approved",
+		AMLStatus:      "approved",
+		LockUntilRound: math.MaxUint64 - 1,
+	}
+
+	d := validateDRWASender(policy, holder, math.MaxUint64)
+	if !d.Allowed {
+		t.Fatalf("expected allowed after uint64-boundary lock expired, got %v", d.DenialCode)
+	}
+}
+
+func TestValidateDRWAMetadataUpdateDeniedWindDownActive(t *testing.T) {
+	t.Parallel()
+
+	decision := validateDRWAMetadataUpdate(&drwaTokenPolicyView{
+		DRWAEnabled:               true,
+		WindDownInitiated:         true,
+		MetadataProtectionEnabled: true,
+	}, true)
+	if decision.DenialCode != errDRWAWindDownActive {
+		t.Fatalf("expected wind-down denial for metadata update, got %v", decision.DenialCode)
 	}
 }
