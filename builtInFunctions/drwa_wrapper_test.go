@@ -16,6 +16,18 @@ type drwaReaderStub struct {
 	getTokenPolicy func(tokenIdentifier []byte) (*drwaTokenPolicyView, error)
 	getHolder      func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error)
 	getAssetRecord func(tokenIdentifier []byte) (*drwaAssetRecordView, error)
+	isDRWAActive   func(tokenIdentifier []byte) (bool, error)
+}
+
+func newNoopDRWAReader() *drwaReaderStub {
+	return &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return nil, nil
+		},
+		getHolder: func(tokenIdentifier []byte, address []byte, currentAccount vmcommon.UserAccountHandler) (*drwaHolderMirrorView, error) {
+			return nil, nil
+		},
+	}
 }
 
 func (d *drwaReaderStub) GetTokenPolicy(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
@@ -32,6 +44,13 @@ func (d *drwaReaderStub) GetAssetRecord(tokenIdentifier []byte) (*drwaAssetRecor
 	}
 	// Default: no asset record (token not regulated)
 	return nil, nil
+}
+
+func (d *drwaReaderStub) IsDRWAActive(tokenIdentifier []byte) (bool, error) {
+	if d.isDRWAActive != nil {
+		return d.isDRWAActive(tokenIdentifier)
+	}
+	return false, nil
 }
 
 func TestCheckDRWAWrappersAndRegulatedTokenEvaluation(t *testing.T) {
@@ -66,21 +85,27 @@ func TestCheckDRWAWrappersAndRegulatedTokenEvaluation(t *testing.T) {
 		},
 	}
 
-	regulated, policy, err := isDRWARegulatedToken(reader, []byte("regulated"))
+	regulated, policy, err := isDRWARegulatedToken(reader, []byte("regulated"), true)
 	require.NoError(t, err)
 	require.True(t, regulated)
 	require.True(t, policy.DRWAEnabled)
 
-	regulated, policy, err = isDRWARegulatedToken(reader, []byte("plain"))
+	regulated, policy, err = isDRWARegulatedToken(reader, []byte("plain"), true)
 	require.NoError(t, err)
 	require.False(t, regulated)
 	require.Nil(t, policy)
 
-	// nil reader → not regulated, no error (fail-open for non-DRWA nodes)
-	regulated, policy, err = isDRWARegulatedToken(nil, []byte("regulated"))
+	// nil reader with enforcement disabled → not regulated, no error.
+	regulated, policy, err = isDRWARegulatedToken(nil, []byte("regulated"), false)
 	require.False(t, regulated)
 	require.Nil(t, policy)
 	require.NoError(t, err)
+
+	// nil reader with enforcement enabled must fail closed.
+	regulated, policy, err = isDRWARegulatedToken(nil, []byte("regulated"), true)
+	require.False(t, regulated)
+	require.Nil(t, policy)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
 
 	err = checkDRWASenderTransfer(reader, []byte("regulated"), []byte("holder"), mock.NewUserAccount([]byte("holder")), 1)
 	require.NoError(t, err)
@@ -121,6 +146,24 @@ func TestCheckDRWAWrappersAndRegulatedTokenEvaluation(t *testing.T) {
 	}, []byte("plain"), []byte("holder"), nil)
 	require.False(t, regulated)
 	require.NoError(t, err)
+}
+
+func TestIsDRWARegulatedToken_ActiveTokenWithoutPolicyReturnsCodeZero(t *testing.T) {
+	t.Parallel()
+
+	reader := &drwaReaderStub{
+		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
+			return nil, nil
+		},
+		isDRWAActive: func(tokenIdentifier []byte) (bool, error) {
+			return true, nil
+		},
+	}
+
+	regulated, policy, err := isDRWARegulatedToken(reader, []byte("BOND-1"), true)
+	require.True(t, regulated)
+	require.Nil(t, policy)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
 }
 
 func TestGetTokenPolicyAndHolderMirrorErrorPaths(t *testing.T) {
@@ -245,6 +288,128 @@ func TestGetHolderMirrorMergesProfileAndAuditorAuthorization(t *testing.T) {
 	require.True(t, merged.AuditorAuthorized)
 }
 
+func TestGetHolderMirrorNewerProfileOverridesStaleHolderSharedFields(t *testing.T) {
+	t.Parallel()
+
+	holderAccount := mock.NewAccountWrapMock([]byte("holder"))
+	accounts := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return holderAccount, nil
+		},
+	}
+
+	reader, err := newDRWAAccountsReader(accounts)
+	require.NoError(t, err)
+
+	// Older holder mirror state.
+	mustSaveDRWAHolderBinary(t, holderAccount, "CARBON-NEWER", "holder", 1, "pending", "blocked", "RETAIL", "FR", 55, false, false, false)
+	// Newer identity profile must win for shared identity fields.
+	mustSaveDRWAHolderProfile(t, holderAccount, "holder", &drwaHolderProfileView{
+		KYCStatus:        "approved",
+		AMLStatus:        "approved",
+		InvestorClass:    "QIB",
+		JurisdictionCode: "US",
+		ExpiryRound:      99,
+	})
+	// Re-save profile with explicit higher wrapped version.
+	profileBody, err := json.Marshal(&drwaHolderProfileView{
+		KYCStatus:        "approved",
+		AMLStatus:        "approved",
+		InvestorClass:    "QIB",
+		JurisdictionCode: "US",
+		ExpiryRound:      99,
+	})
+	require.NoError(t, err)
+	profileBytes, err := json.Marshal(&drwaStoredValue{
+		Version: 2,
+		Body:    profileBody,
+	})
+	require.NoError(t, err)
+	require.NoError(t, holderAccount.AccountDataHandler().SaveKeyValue(BuildDRWAHolderProfileKey([]byte("holder")), profileBytes))
+
+	merged, err := reader.GetHolderMirror([]byte("CARBON-NEWER"), []byte("holder"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, merged)
+	require.Equal(t, "approved", merged.KYCStatus)
+	require.Equal(t, "approved", merged.AMLStatus)
+	require.Equal(t, "QIB", merged.InvestorClass)
+	require.Equal(t, "US", merged.JurisdictionCode)
+	// IdentityExpiryRound always follows the profile.
+	require.Equal(t, uint64(99), merged.IdentityExpiryRound)
+	// Token-specific fields still come from the holder mirror.
+	require.Equal(t, uint64(55), merged.ExpiryRound)
+}
+
+func TestGetHolderMirrorNewerAuditorAuthorizationOverridesHolderFlag(t *testing.T) {
+	t.Parallel()
+
+	holderAccount := mock.NewAccountWrapMock([]byte("holder"))
+	accounts := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return holderAccount, nil
+		},
+	}
+
+	reader, err := newDRWAAccountsReader(accounts)
+	require.NoError(t, err)
+
+	mustSaveDRWAHolderBinary(t, holderAccount, "CARBON-AUDIT", "holder", 1, "approved", "approved", "QIB", "SG", 55, false, false, false)
+
+	auditorBody, err := json.Marshal(&drwaHolderAuditorAuthorizationView{
+		AuditorAuthorized: true,
+	})
+	require.NoError(t, err)
+	auditorWrapped, err := json.Marshal(&drwaStoredValue{
+		Version: 2,
+		Body:    auditorBody,
+	})
+	require.NoError(t, err)
+	require.NoError(t, holderAccount.AccountDataHandler().SaveKeyValue(
+		BuildDRWAHolderAuditorAuthorizationKey([]byte("CARBON-AUDIT"), []byte("holder")),
+		auditorWrapped,
+	))
+
+	merged, err := reader.GetHolderMirror([]byte("CARBON-AUDIT"), []byte("holder"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, merged)
+	require.True(t, merged.AuditorAuthorized)
+}
+
+func TestGetHolderMirrorAuditorAuthorizationOverridesHistoricalHolderFlag(t *testing.T) {
+	t.Parallel()
+
+	holderAccount := mock.NewAccountWrapMock([]byte("holder"))
+	accounts := &mock.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			return holderAccount, nil
+		},
+	}
+
+	reader, err := newDRWAAccountsReader(accounts)
+	require.NoError(t, err)
+
+	mustSaveDRWAHolderBinary(t, holderAccount, "CARBON-AUDIT", "holder", 2, "approved", "approved", "QIB", "SG", 55, false, false, true)
+
+	auditorBody, err := json.Marshal(&drwaHolderAuditorAuthorizationView{
+		AuditorAuthorized: false,
+	})
+	require.NoError(t, err)
+	auditorWrapped, err := json.Marshal(&drwaStoredValue{
+		Version: 1,
+		Body:    auditorBody,
+	})
+	require.NoError(t, err)
+	require.NoError(t, holderAccount.AccountDataHandler().SaveKeyValue(
+		BuildDRWAHolderAuditorAuthorizationKey([]byte("CARBON-AUDIT"), []byte("holder")),
+		auditorWrapped,
+	))
+
+	merged, err := reader.GetHolderMirror([]byte("CARBON-AUDIT"), []byte("holder"), nil)
+	require.NoError(t, err)
+	require.NotNil(t, merged)
+	require.False(t, merged.AuditorAuthorized)
+}
+
 func TestValidateDRWASenderChecksBothIdentityAndTokenExpiry(t *testing.T) {
 	t.Parallel()
 
@@ -287,10 +452,10 @@ func TestValidateDRWAReceiverChecksIdentityExpiry(t *testing.T) {
 func TestDRWAEvaluationErrorPaths(t *testing.T) {
 	t.Parallel()
 
-	// nil reader → not regulated, no error (fail-open)
+	// nil reader with enforcement active must fail closed.
 	regulated, err := evaluateDRWASenderTransfer(nil, []byte("regulated"), []byte("holder"), nil, 1)
 	require.False(t, regulated)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
 
 	regulated, err = evaluateDRWASenderTransfer(&drwaReaderStub{
 		getTokenPolicy: func(tokenIdentifier []byte) (*drwaTokenPolicyView, error) {
@@ -452,7 +617,7 @@ func TestCheckDRWAMetadataUpdate_NilReaderPasses(t *testing.T) {
 	t.Parallel()
 
 	err := checkDRWAMetadataUpdate(nil, []byte("ANY-1"), []byte("caller"), nil)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
 }
 
 func TestCheckDRWAMetadataUpdate_KYCDenied(t *testing.T) {

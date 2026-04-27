@@ -149,12 +149,9 @@ func (e *esdtNFTTransfer) ProcessBuiltinFunction(
 		return nil, ErrInvalidRcvAddr
 	}
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// Pre-charge DRWA gas before state reads (matches esdtTransfer.go pattern).
-		// In cross-shard NFT path, only receiver is checked (sender is nil).
-		// 4 reads per side: policy + holder mirror + profile + auditor auth.
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
-		if vmInput.GasProvided < drwaMaxGas {
-			return nil, ErrNotEnoughGas
+		if e.drwaReader == nil {
+			recordDRWAGateMetric(drwaGateMetricReaderMissing)
+			return nil, errDRWAStateReaderMissing
 		}
 		_, drwaErr := evaluateDRWAReceiverTransfer(e.drwaReader, vmInput.Arguments[0], vmInput.RecipientAddr, acntDst, e.CurrentRound())
 		err = drwaErr
@@ -248,15 +245,16 @@ func (e *esdtNFTTransfer) processNFTTransferOnSenderShard(
 	skipGasUse := noGasUseIfReturnCallAfterErrorWithFlag(e.enableEpochsHandler, vmInput)
 	gasToUse := e.funcGasCost
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
-		// pre-charge max DRWA gas before state reads (sender-side)
-		// 4 reads per side: policy + holder mirror + profile + auditor auth.
-		drwaMaxGas := computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
-		if !skipGasUse && vmInput.GasProvided < gasToUse+drwaMaxGas {
-			return nil, ErrNotEnoughGas
+		if e.drwaReader == nil {
+			recordDRWAGateMetric(drwaGateMetricReaderMissing)
+			return nil, errDRWAStateReaderMissing
 		}
 		regulated, drwaErr := evaluateDRWASenderTransfer(e.drwaReader, vmInput.Arguments[0], vmInput.CallerAddr, acntSnd, e.CurrentRound())
 		if regulated {
-			gasToUse += drwaMaxGas
+			gasToUse += computeDRWAReadGasCost(e.gasConfig, e.funcGasCost, 4)
+			if !skipGasUse && vmInput.GasProvided < gasToUse {
+				return nil, ErrNotEnoughGas
+			}
 		}
 		err := drwaErr
 		if err != nil {

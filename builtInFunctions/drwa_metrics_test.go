@@ -2,6 +2,7 @@ package builtInFunctions
 
 import (
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -25,6 +26,8 @@ func TestDRWAMetricConstants_NonEmpty(t *testing.T) {
 		{"drwaGateMetricDeniedSanctions", drwaGateMetricDeniedSanctions},
 		{"drwaGateMetricDeniedWindDown", drwaGateMetricDeniedWindDown},
 		{"drwaGateMetricDeniedPolicyNotSynced", drwaGateMetricDeniedPolicyNotSynced},
+		{"drwaGateMetricReaderMissing", drwaGateMetricReaderMissing},
+		{"drwaGateMetricHolderRecordsAllMissing", drwaGateMetricHolderRecordsAllMissing},
 		{"drwaGateMetricDecodeFailure", drwaGateMetricDecodeFailure},
 		{"drwaGateMetricDecodeFailureJSON", drwaGateMetricDecodeFailureJSON},
 		{"drwaGateMetricDecodeFailureBinary", drwaGateMetricDecodeFailureBinary},
@@ -54,6 +57,8 @@ func TestDRWAMetricConstants_NoDuplicates(t *testing.T) {
 		drwaGateMetricDeniedSanctions,
 		drwaGateMetricDeniedWindDown,
 		drwaGateMetricDeniedPolicyNotSynced,
+		drwaGateMetricReaderMissing,
+		drwaGateMetricHolderRecordsAllMissing,
 		drwaGateMetricDecodeFailure,
 		drwaGateMetricDecodeFailureJSON,
 		drwaGateMetricDecodeFailureBinary,
@@ -81,6 +86,7 @@ func TestSnapshotDRWAGateMetrics_Smoke(t *testing.T) {
 
 func TestRecordDRWAGateMetric_IncrementsCorrectCounter(t *testing.T) {
 	resetDRWAGateMetrics()
+	SetDRWAMetricsExporter(nil)
 
 	recordDRWAGateMetric(drwaGateMetricDeniedPaused)
 	recordDRWAGateMetric(drwaGateMetricDeniedPaused)
@@ -96,6 +102,56 @@ func TestRecordDRWAGateMetric_IncrementsCorrectCounter(t *testing.T) {
 	// Other counters must remain absent.
 	if snap[drwaGateMetricDeniedExpiry] != 0 {
 		t.Errorf("expected %s=0, got %d", drwaGateMetricDeniedExpiry, snap[drwaGateMetricDeniedExpiry])
+	}
+}
+
+func TestSetDRWAMetricsExporter_RecordDRWAGateMetricInvokesExporter(t *testing.T) {
+	resetDRWAGateMetrics()
+	defer SetDRWAMetricsExporter(nil)
+
+	var mut sync.Mutex
+	calls := make([]struct {
+		metric string
+		delta  uint64
+	}, 0)
+	SetDRWAMetricsExporter(func(metric string, delta uint64) {
+		mut.Lock()
+		calls = append(calls, struct {
+			metric string
+			delta  uint64
+		}{metric: metric, delta: delta})
+		mut.Unlock()
+	})
+
+	recordDRWAGateMetric(drwaGateMetricDeniedPaused)
+	recordDRWAGateMetric(drwaGateMetricDeniedKYCSender)
+
+	mut.Lock()
+	defer mut.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected exporter to be called twice, got %d", len(calls))
+	}
+	if calls[0].metric != drwaGateMetricDeniedPaused || calls[0].delta != 1 {
+		t.Fatalf("unexpected first exporter call: %+v", calls[0])
+	}
+	if calls[1].metric != drwaGateMetricDeniedKYCSender || calls[1].delta != 1 {
+		t.Fatalf("unexpected second exporter call: %+v", calls[1])
+	}
+}
+
+func TestSetDRWAMetricsExporter_ExporterPanicDoesNotBreakCounterUpdate(t *testing.T) {
+	resetDRWAGateMetrics()
+	defer SetDRWAMetricsExporter(nil)
+
+	SetDRWAMetricsExporter(func(metric string, delta uint64) {
+		panic("boom")
+	})
+
+	recordDRWAGateMetric(drwaGateMetricDeniedPaused)
+
+	snap := SnapshotDRWAGateMetrics()
+	if snap[drwaGateMetricDeniedPaused] != 1 {
+		t.Fatalf("expected %s=1 after exporter panic, got %d", drwaGateMetricDeniedPaused, snap[drwaGateMetricDeniedPaused])
 	}
 }
 

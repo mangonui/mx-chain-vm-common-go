@@ -141,9 +141,13 @@ func mustSaveDRWATokenPolicyForBenchmark(b *testing.B, account vmcommon.UserAcco
 func mustSaveDRWAHolderForBenchmark(b *testing.B, account vmcommon.UserAccountHandler, tokenID string, address string, holder *drwaHolderMirrorView) {
 	b.Helper()
 
-	data, err := json.Marshal(holder)
+	body, err := json.Marshal(holder)
 	if err != nil {
 		b.Fatalf("marshal holder mirror: %v", err)
+	}
+	data, err := json.Marshal(&drwaStoredValue{Version: 1, Body: body})
+	if err != nil {
+		b.Fatalf("marshal holder mirror stored value: %v", err)
 	}
 	if err = account.AccountDataHandler().SaveKeyValue(BuildDRWAHolderMirrorKey([]byte(tokenID), []byte(address)), data); err != nil {
 		b.Fatalf("save holder mirror: %v", err)

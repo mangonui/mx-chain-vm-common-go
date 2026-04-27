@@ -84,6 +84,14 @@ type BlockchainHook interface {
 	// ApplyDRWASyncEnvelopeBytes applies an encoded DRWA sync envelope atomically.
 	ApplyDRWASyncEnvelopeBytes(payload []byte, callerAddress []byte) error
 
+	// QueryDRWANativeGovernance returns encoded native DRWA governance state for
+	// the supplied query type and key.
+	QueryDRWANativeGovernance(queryType uint32, key []byte) ([]byte, error)
+
+	// IsAuthorizedDRWASyncCaller returns whether the caller address matches any
+	// currently provisioned DRWA sync authorized caller.
+	IsAuthorizedDRWASyncCaller(callerAddress []byte) bool
+
 	// GetBuiltinFunctionNames returns the names of protocol built-in functions
 	GetBuiltinFunctionNames() FunctionNames
 

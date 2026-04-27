@@ -41,7 +41,7 @@ func drwaDisabledEpochsHandler() *mock.EnableEpochsHandlerStub {
 func TestNonDRWAESDTTransfer_FlagDisabled(t *testing.T) {
 	t.Parallel()
 
-	accounts, state := createDRWATestAccounts()
+	_, state := createDRWATestAccounts()
 	transferFunc, err := NewESDTTransferFunc(
 		10,
 		&mock.MarshalizerMock{},
@@ -81,11 +81,11 @@ func TestNonDRWAESDTTransfer_FlagDisabled(t *testing.T) {
 	require.Equal(t, vmcommon.Ok, output.ReturnCode,
 		"flag-disabled transfer must succeed regardless of policy state")
 
-	_ = accounts
+	// no-op
 }
 
-// TestNonDRWAESDTTransfer_NoDRWAReader verifies a plain ESDT transfer succeeds
-// when no DRWA reader is attached to the transfer function at all.
+// TestNonDRWAESDTTransfer_NoDRWAReader verifies a plain ESDT transfer fails
+// when DRWA enforcement is enabled but no reader is attached.
 func TestNonDRWAESDTTransfer_NoDRWAReader(t *testing.T) {
 	t.Parallel()
 
@@ -118,10 +118,8 @@ func TestNonDRWAESDTTransfer_NoDRWAReader(t *testing.T) {
 	}
 
 	output, err := transferFunc.ProcessBuiltinFunction(sender, receiver, vmInput)
-	require.NoError(t, err)
-	require.NotNil(t, output)
-	require.Equal(t, vmcommon.Ok, output.ReturnCode,
-		"transfer with nil DRWA reader must succeed (no DRWA check)")
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
+	require.Nil(t, output)
 }
 
 // TestNonDRWAESDTTransfer_NoPolicy verifies a plain ESDT transfer succeeds when
@@ -266,7 +264,7 @@ func TestNonDRWAMultiESDTTransfer_CrossShardFlagDisabled(t *testing.T) {
 func TestNonDRWAESDTTransfer_GasUnchanged(t *testing.T) {
 	t.Parallel()
 
-	_, state := createDRWATestAccounts()
+	accounts, state := createDRWATestAccounts()
 	transferFunc, err := NewESDTTransferFunc(
 		10,
 		&mock.MarshalizerMock{},
@@ -277,7 +275,8 @@ func TestNonDRWAESDTTransfer_GasUnchanged(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, transferFunc.SetPayableChecker(&mock.PayableHandlerStub{}))
-	// No DRWA reader → pure non-DRWA path.
+	// Attach DRWA reader but do not register a policy for the token.
+	transferFunc.SetDRWAReader(mustCreateDRWAReader(t, accounts))
 
 	sender := state["sender"]
 	receiver := state["receiver"]
