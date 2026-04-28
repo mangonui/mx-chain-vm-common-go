@@ -27,13 +27,23 @@ func (c *DrwaCounterSet) Snapshot() map[string]uint64 {
 	defer c.mut.Unlock()
 	out := make(map[string]uint64, len(c.counters))
 	for k, v := range c.counters {
+		if v == 0 {
+			continue
+		}
 		out[k] = v
 	}
 	return out
 }
 
-func (c *DrwaCounterSet) Reset() {
+func (c *DrwaCounterSet) Reset() map[string]uint64 {
 	c.mut.Lock()
-	c.counters = make(map[string]uint64)
-	c.mut.Unlock()
+	defer c.mut.Unlock()
+
+	out := make(map[string]uint64, len(c.counters))
+	for k, v := range c.counters {
+		out[k] = v
+		c.counters[k] = 0
+	}
+
+	return out
 }

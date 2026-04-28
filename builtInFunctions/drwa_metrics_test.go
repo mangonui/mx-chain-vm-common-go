@@ -187,6 +187,20 @@ func TestDrwaDenialMetric_KnownCodes(t *testing.T) {
 	}
 }
 
+func TestDrwaDenialMetric_AllDenialCodesHaveMetrics(t *testing.T) {
+	seen := make(map[string]struct{})
+	for _, code := range allDRWADenialCodes() {
+		metric := drwaDenialMetric(code)
+		if metric == "" {
+			t.Fatalf("missing DRWA denial metric mapping for %v", code)
+		}
+		if _, exists := seen[metric]; exists {
+			t.Fatalf("duplicate DRWA denial metric mapping for %q", metric)
+		}
+		seen[metric] = struct{}{}
+	}
+}
+
 func TestDrwaDenialMetric_UnknownCodeReturnsEmpty(t *testing.T) {
 	unknown := errors.New("UNKNOWN_ERROR")
 	result := drwaDenialMetric(unknown)
