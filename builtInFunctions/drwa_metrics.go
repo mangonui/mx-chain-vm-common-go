@@ -36,6 +36,26 @@ var drwaMetricsExporterState = struct {
 	exporter func(metric string, delta uint64)
 }{}
 
+func allDRWADenialCodes() []error {
+	return []error{
+		errDRWAPolicyNotSynced,
+		errDRWATokenPaused,
+		errDRWAKYCRequiredSender,
+		errDRWAAMLBlockedSender,
+		errDRWAAssetExpired,
+		errDRWATransferLocked,
+		errDRWAKYCRequiredReceiver,
+		errDRWAAMLBlockedReceiver,
+		errDRWAReceiveLocked,
+		errDRWAInvestorClass,
+		errDRWAJurisdiction,
+		errDRWAAuditorRequired,
+		errDRWATravelRuleRequired,
+		errDRWASanctionsMatch,
+		errDRWAWindDownActive,
+	}
+}
+
 // SetDRWAMetricsExporter configures an optional callback invoked on every DRWA
 // gate metric increment. Passing nil disables the callback. This supplements
 // the in-process snapshot model without changing it.

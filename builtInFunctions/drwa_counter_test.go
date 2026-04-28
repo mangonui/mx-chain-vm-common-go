@@ -113,11 +113,19 @@ func TestDrwaCounterSet_OverflowProtection_OneBelowMax(t *testing.T) {
 func TestDrwaCounterSet_Reset(t *testing.T) {
 	cs := NewDrwaCounterSet()
 	cs.Increment("a")
+	cs.Increment("a")
 	cs.Increment("b")
-	cs.Reset()
+	previous := cs.Reset()
+
+	if previous["a"] != 2 {
+		t.Fatalf("expected Reset to return previous a=2, got %d", previous["a"])
+	}
+	if previous["b"] != 1 {
+		t.Fatalf("expected Reset to return previous b=1, got %d", previous["b"])
+	}
 
 	snap := cs.Snapshot()
 	if len(snap) != 0 {
-		t.Fatalf("expected empty snapshot after Reset, got %d entries", len(snap))
+		t.Fatalf("expected empty visible snapshot after Reset, got %d entries", len(snap))
 	}
 }
