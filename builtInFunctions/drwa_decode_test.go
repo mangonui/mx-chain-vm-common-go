@@ -17,10 +17,10 @@ import (
 // (which would create a circular dependency).
 type nonUserAccountStub struct{}
 
-func (s *nonUserAccountStub) AddressBytes() []byte    { return []byte("stub") }
-func (s *nonUserAccountStub) IncreaseNonce(_ uint64)   { /* no-op stub */ }
-func (s *nonUserAccountStub) GetNonce() uint64         { return 0 }
-func (s *nonUserAccountStub) IsInterfaceNil() bool     { return false }
+func (s *nonUserAccountStub) AddressBytes() []byte   { return []byte("stub") }
+func (s *nonUserAccountStub) IncreaseNonce(_ uint64) { /* no-op stub */ }
+func (s *nonUserAccountStub) GetNonce() uint64       { return 0 }
+func (s *nonUserAccountStub) IsInterfaceNil() bool   { return false }
 
 func TestNewDRWAAccountsReaderRejectsNilAccounts(t *testing.T) {
 	t.Parallel()
@@ -250,6 +250,17 @@ func TestDecodeDRWABinaryHolderProfileRejectsFieldAndTrailerCorruption(t *testin
 	shortTrailer = appendLenPrefixed(shortTrailer, []byte("US"))
 	shortTrailer = append(shortTrailer, make([]byte, 7)...)
 	err = decodeDRWABinaryHolderProfile(shortTrailer, &drwaHolderProfileView{})
+	require.Error(t, err)
+
+	trailingBytes := make([]byte, 0, 48)
+	trailingBytes = append(trailingBytes, make([]byte, 8)...)
+	trailingBytes = appendLenPrefixed(trailingBytes, []byte("approved"))
+	trailingBytes = appendLenPrefixed(trailingBytes, []byte("approved"))
+	trailingBytes = appendLenPrefixed(trailingBytes, []byte("qib"))
+	trailingBytes = appendLenPrefixed(trailingBytes, []byte("US"))
+	trailingBytes = append(trailingBytes, make([]byte, 8)...)
+	trailingBytes = append(trailingBytes, 0xAA)
+	err = decodeDRWABinaryHolderProfile(trailingBytes, &drwaHolderProfileView{})
 	require.Error(t, err)
 }
 

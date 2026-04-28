@@ -803,11 +803,17 @@ func decodeDRWABinaryHolderProfile(data []byte, destination *drwaHolderProfileVi
 		return errors.New("invalid DRWA binary holder profile trailer")
 	}
 
+	expiryRound := binary.BigEndian.Uint64(data[cursor : cursor+8])
+	cursor += 8
+	if cursor != len(data) {
+		return errors.New("invalid DRWA binary holder profile trailing bytes")
+	}
+
 	destination.KYCStatus = string(kycStatus)
 	destination.AMLStatus = string(amlStatus)
 	destination.InvestorClass = string(investorClass)
 	destination.JurisdictionCode = string(jurisdictionCode)
-	destination.ExpiryRound = binary.BigEndian.Uint64(data[cursor : cursor+8])
+	destination.ExpiryRound = expiryRound
 
 	return nil
 }
@@ -882,10 +888,11 @@ func computeDRWAReadGasCost(baseCost vmcommon.BaseOperationCost, fallbackCost ui
 	if unitCost > math.MaxUint64/gasUnits {
 		return math.MaxUint64
 	}
-	if reads > math.MaxUint64/(unitCost*gasUnits) {
+	costPerRead := unitCost * gasUnits
+	if reads > math.MaxUint64/costPerRead {
 		return math.MaxUint64
 	}
-	return reads * unitCost * gasUnits
+	return reads * costPerRead
 }
 
 // Upstream dependency impact assessment for DRWA compliance enforcement.

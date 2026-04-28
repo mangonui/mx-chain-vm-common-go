@@ -226,3 +226,20 @@ func TestCreateBuiltInContainer_CreateReturnsErrorWhenDRWAReaderAttachFails(t *t
 	require.Error(t, err)
 	require.ErrorIs(t, err, errDRWATestReaderAttach)
 }
+
+func TestCreateBuiltInContainer_CreateReturnsErrorWhenDRWAReaderFactoryReturnsNil(t *testing.T) {
+	args := createMockArguments()
+	f, _ := NewBuiltInFunctionsCreator(args)
+
+	previousFactory := drwaAccountsReaderFactory
+	drwaAccountsReaderFactory = func(accounts vmcommon.AccountsAdapter) (*drwaAccountsReader, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		drwaAccountsReaderFactory = previousFactory
+	})
+
+	err := f.CreateBuiltInFunctionContainer()
+	require.Error(t, err)
+	require.ErrorIs(t, err, errDRWAStateReaderMissing)
+}
