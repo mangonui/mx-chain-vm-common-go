@@ -241,5 +241,6 @@ func TestCreateBuiltInContainer_CreateReturnsErrorWhenDRWAReaderFactoryReturnsNi
 
 	err := f.CreateBuiltInFunctionContainer()
 	require.Error(t, err)
-	require.ErrorIs(t, err, errDRWAStateReaderMissing)
+	require.ErrorIs(t, err, errDRWAStateReaderAttachMissing)
+	require.NotErrorIs(t, err, errDRWAStateReaderMissing)
 }
