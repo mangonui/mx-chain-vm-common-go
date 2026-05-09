@@ -111,6 +111,10 @@ func (e *esdtNFTAddUri) ProcessBuiltinFunction(
 	}
 	drwaGasCost := uint64(0)
 	if isDRWAEnforcementEnabled(e.enableEpochsHandler) {
+		if e.drwaReader == nil {
+			recordDRWAGateMetric(drwaGateMetricReaderMissing)
+			return nil, errDRWAStateReaderMissing
+		}
 		regulated, drwaErr := evaluateDRWAMetadataUpdate(e.drwaReader, vmInput.Arguments[0], vmInput.CallerAddr, acntSnd)
 		if regulated {
 			// 4 reads: policy + holder mirror + profile + auditor auth.

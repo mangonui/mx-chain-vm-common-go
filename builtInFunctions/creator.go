@@ -698,7 +698,7 @@ func (b *builtInFuncCreator) attachDRWAReaderIfSupported(builtInFunc vmcommon.Bu
 		return fmt.Errorf("attach DRWA reader: %w", err)
 	}
 	if reader == nil {
-		return fmt.Errorf("attach DRWA reader: %w", errDRWAStateReaderMissing)
+		return fmt.Errorf("attach DRWA reader: %w", errDRWAStateReaderAttachMissing)
 	}
 
 	readerAware.SetDRWAReader(reader)

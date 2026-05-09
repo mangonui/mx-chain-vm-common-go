@@ -100,24 +100,25 @@ const (
 )
 
 var (
-	errDRWAPolicyNotSynced     = errors.New(string(coredrwa.DenialPolicyNotSynced)) // code 0 — regulated token has no synced policy
-	errDRWATokenPaused         = errors.New(string(coredrwa.DenialTokenPaused))     // code 1
-	errDRWAKYCRequiredSender   = errors.New(string(coredrwa.DenialKYCRequiredSender))
-	errDRWAAMLBlockedSender    = errors.New(string(coredrwa.DenialAMLBlockedSender))
-	errDRWAAssetExpired        = errors.New(string(coredrwa.DenialAssetExpired))
-	errDRWATransferLocked      = errors.New(string(coredrwa.DenialTransferLocked))
-	errDRWAKYCRequiredReceiver = errors.New(string(coredrwa.DenialKYCRequiredReceiver))
-	errDRWAAMLBlockedReceiver  = errors.New(string(coredrwa.DenialAMLBlockedReceiver))
-	errDRWAReceiveLocked       = errors.New(string(coredrwa.DenialReceiveLocked))
-	errDRWAInvestorClass       = errors.New(string(coredrwa.DenialInvestorClass))
-	errDRWAJurisdiction        = errors.New(string(coredrwa.DenialJurisdiction))
-	errDRWAAuditorRequired     = errors.New(string(coredrwa.DenialAuditorRequired))    // code 11
-	errDRWATravelRuleRequired  = errors.New(string(coredrwa.DenialTravelRuleRequired)) // code 12 — FATF Travel Rule attestation missing
-	errDRWASanctionsMatch      = errors.New(string(coredrwa.DenialSanctionsMatch))     // code 13 — holder failed sanctions screening
-	errDRWAWindDownActive      = errors.New(string(coredrwa.DenialWindDownActive))     // code 14 — MiCA orderly wind-down in progress
-	errDRWANilAccountsAdapter  = errors.New("nil DRWA accounts adapter")
-	errDRWAStateReaderMissing  = errors.New("DRWA_STATE_READER_MISSING")
-	errDRWABinaryFieldOverflow = errors.New("DRWA_BINARY_FIELD_OVERFLOW")
+	errDRWAPolicyNotSynced          = errors.New(string(coredrwa.DenialPolicyNotSynced)) // code 0 — regulated token has no synced policy
+	errDRWATokenPaused              = errors.New(string(coredrwa.DenialTokenPaused))     // code 1
+	errDRWAKYCRequiredSender        = errors.New(string(coredrwa.DenialKYCRequiredSender))
+	errDRWAAMLBlockedSender         = errors.New(string(coredrwa.DenialAMLBlockedSender))
+	errDRWAAssetExpired             = errors.New(string(coredrwa.DenialAssetExpired))
+	errDRWATransferLocked           = errors.New(string(coredrwa.DenialTransferLocked))
+	errDRWAKYCRequiredReceiver      = errors.New(string(coredrwa.DenialKYCRequiredReceiver))
+	errDRWAAMLBlockedReceiver       = errors.New(string(coredrwa.DenialAMLBlockedReceiver))
+	errDRWAReceiveLocked            = errors.New(string(coredrwa.DenialReceiveLocked))
+	errDRWAInvestorClass            = errors.New(string(coredrwa.DenialInvestorClass))
+	errDRWAJurisdiction             = errors.New(string(coredrwa.DenialJurisdiction))
+	errDRWAAuditorRequired          = errors.New(string(coredrwa.DenialAuditorRequired))    // code 11
+	errDRWATravelRuleRequired       = errors.New(string(coredrwa.DenialTravelRuleRequired)) // code 12 — FATF Travel Rule attestation missing
+	errDRWASanctionsMatch           = errors.New(string(coredrwa.DenialSanctionsMatch))     // code 13 — holder failed sanctions screening
+	errDRWAWindDownActive           = errors.New(string(coredrwa.DenialWindDownActive))     // code 14 — MiCA orderly wind-down in progress
+	errDRWANilAccountsAdapter       = errors.New("nil DRWA accounts adapter")
+	errDRWAStateReaderMissing       = errors.New("DRWA_STATE_READER_MISSING")
+	errDRWAStateReaderAttachMissing = errors.New("DRWA state reader factory returned nil")
+	errDRWABinaryFieldOverflow      = errors.New("DRWA_BINARY_FIELD_OVERFLOW")
 )
 
 const (
